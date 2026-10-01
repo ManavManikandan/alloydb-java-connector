@@ -82,7 +82,6 @@ JDBC property names and `ConnectorConfig.Builder` methods are user-facing. Docum
 - Do not commit credentials, `.envrc`, service-account JSON, or real instance URIs. `.envrc.example` stays placeholder-only.
 - Do not log access tokens, passwords, private keys, or certificate private material.
 - Do not weaken TLS, disable certificate checks, or accept plaintext connections.
-- Report vulnerabilities through https://g.co/vulnz. Do not file a public GitHub issue for a security bug.
 
 ## Pull requests
 
