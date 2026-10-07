@@ -37,6 +37,7 @@ public class AlloyDbJdbcServiceAccountImpersonationDataSourceFactory {
     // e.g., "projects/my-project/locations/us-central1/clusters/my-cluster/instances/my-instance"
     config.addDataSourceProperty("alloydbInstanceName", ALLOYDB_INSTANCE_NAME);
     config.addDataSourceProperty("alloydbTargetPrincipal", ALLOYDB_IMPERSONATED_USER);
+    config.addDataSourceProperty("alloydbIpType", "PUBLIC");
 
     return new HikariDataSource(config);
   }

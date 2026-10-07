@@ -34,6 +34,7 @@ public class AlloyDbJdbcAutoIAMAuthNDataSourceFactory {
     // e.g., "projects/my-project/locations/us-central1/clusters/my-cluster/instances/my-instance"
     config.addDataSourceProperty("alloydbInstanceName", ALLOYDB_INSTANCE_NAME);
     config.addDataSourceProperty("alloydbEnableIAMAuth", "true");
+    config.addDataSourceProperty("alloydbIpType", "PUBLIC");
 
     return new HikariDataSource(config);
   }
