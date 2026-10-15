@@ -79,7 +79,10 @@ public class ITConnectorTest {
   public void testConnect_createsSocketConnection() throws IOException {
     SSLSocket socket = null;
     ConnectionConfig config =
-        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(instanceName)).build();
+        new ConnectionConfig.Builder()
+            .withInstanceName(InstanceName.parse(instanceName))
+            .withIpType(IpType.PUBLIC)
+            .build();
     try {
       Connector connector =
           new Connector(
