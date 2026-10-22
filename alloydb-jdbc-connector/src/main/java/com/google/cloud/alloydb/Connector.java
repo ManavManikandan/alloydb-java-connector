@@ -49,6 +49,8 @@ class Connector {
   private final String clientUid;
   private final ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders;
   private final ConcurrentHashMap<String, MetricExporter> metricExporters;
+  // Null when the application has not configured a MeterProvider.
+  private final ClientMetricRecorder clientMetricRecorder;
   private final InstrumentedSocket.Tracker socketTracker;
   private final Object socketTrackerGuard = new Object();
 
@@ -103,6 +105,8 @@ class Connector {
     this.metricRecorders = metricRecorders;
     this.metricExporters = new ConcurrentHashMap<>();
     this.socketTracker = new InstrumentedSocket.Tracker();
+    this.clientMetricRecorder =
+        MetricRecorderFactory.newClientMetricRecorder(config.getMeterProvider());
   }
 
   /**
@@ -155,7 +159,8 @@ class Connector {
     this.instances.clear();
     this.connectionInfoRepo.close();
     // Shut down all metric recorders. One recorder failing to shut down must not leave the rest
-    // of them running.
+    // of them running. The application's MeterProvider is never shut down here: it belongs to the
+    // application.
     this.metricRecorders.forEach(
         (key, mr) -> {
           try {
@@ -188,9 +193,11 @@ class Connector {
     // Whether the connector already held connection info for this instance before this dial.
     boolean cacheHit = instances.containsKey(config);
 
-    ConnectionInfoCache connectionInfoCache = getConnection(config, metricRecorder);
+    ConnectionInfoCache connectionInfoCache;
     ConnectionInfo connectionInfo;
     try {
+      // getConnection waits for the first refresh, so it fails the same way getConnectionInfo does.
+      connectionInfoCache = getConnection(config, metricRecorder);
       connectionInfo = connectionInfoCache.getConnectionInfo();
     } catch (RuntimeException e) {
       recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_CACHE_ERROR);
@@ -282,16 +289,12 @@ class Connector {
     // Building a recorder can stand up a gRPC channel (see getMetricExporter), which is far too
     // much work to do inside computeIfAbsent while holding a bin lock. Build it outside the map and
     // discard the loser of any race instead.
-    // Metrics stay off until the configuration property that turns them on arrives in a later
-    // change.
     MetricRecorder created =
         MetricRecorderFactory.newMetricRecorder(
-            /* enabled= */ false,
+            config.isBuiltInTelemetryEnabled(),
             () -> getMetricExporter(instanceName.getProject()),
-            instanceName.getProject(),
-            instanceName.getLocation(),
-            instanceName.getCluster(),
-            instanceName.getInstance(),
+            clientMetricRecorder,
+            instanceName,
             clientUid);
     MetricRecorder raced = metricRecorders.putIfAbsent(instanceName, created);
     if (raced != null) {

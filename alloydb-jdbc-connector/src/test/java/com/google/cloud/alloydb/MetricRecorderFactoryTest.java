@@ -19,14 +19,22 @@ package com.google.cloud.alloydb;
 import static com.google.common.truth.Truth.assertThat;
 
 import java.io.IOException;
+import com.google.cloud.alloydb.v1alpha.InstanceName;
+import io.opentelemetry.api.metrics.MeterProvider;
+import io.opentelemetry.sdk.metrics.export.MetricExporter;
+import java.util.Arrays;
+import java.util.Collections;
 import org.junit.Test;
 
 public class MetricRecorderFactoryTest {
 
+  private static final InstanceName INSTANCE_NAME =
+      InstanceName.parse("projects/project/locations/region/clusters/cluster/instances/instance");
+
   @Test
   public void testDisabledReturnsNullRecorderWithoutBuildingAnExporter() {
     MetricRecorder recorder =
-        MetricRecorderFactory.newMetricRecorder(
+        MetricRecorderFactory.newBuiltInMetricRecorder(
             false,
             () -> {
               throw new AssertionError("the exporter must not be built when metrics are disabled");
@@ -46,7 +54,7 @@ public class MetricRecorderFactoryTest {
     // Telemetry never blocks a connection, so a failure to build the exporter must be swallowed in
     // favor of a no-op recorder.
     MetricRecorder recorder =
-        MetricRecorderFactory.newMetricRecorder(
+        MetricRecorderFactory.newBuiltInMetricRecorder(
             true,
             () -> {
               throw new IOException("no credentials");
@@ -59,5 +67,90 @@ public class MetricRecorderFactoryTest {
 
     assertThat(recorder).isInstanceOf(NullMetricRecorder.class);
     assertThat(recorder.isEnabled()).isFalse();
+  }
+
+  @Test
+  public void testNothingConfiguredReturnsNullRecorder() {
+    MetricRecorder recorder =
+        MetricRecorderFactory.newMetricRecorder(false, MetricRecorderFactoryTest::noExporter, null, INSTANCE_NAME, "uid");
+
+    assertThat(recorder).isInstanceOf(NullMetricRecorder.class);
+    assertThat(recorder.isEnabled()).isFalse();
+  }
+
+  @Test
+  public void testClientOnlyIsAlwaysIsolated() {
+    ClientMetricRecorder client = new ClientMetricRecorder(MeterProvider.noop());
+
+    MetricRecorder recorder =
+        MetricRecorderFactory.newMetricRecorder(false, MetricRecorderFactoryTest::noExporter, client, INSTANCE_NAME, "uid");
+
+    assertThat(recorder).isInstanceOf(CompositeMetricRecorder.class);
+    assertThat(((CompositeMetricRecorder) recorder).getDelegates()).hasSize(1);
+    assertThat(recorder.isEnabled()).isTrue();
+  }
+
+  @Test
+  public void testBuiltInFailureStillLeavesClientPath() {
+    ClientMetricRecorder client = new ClientMetricRecorder(MeterProvider.noop());
+
+    MetricRecorder recorder =
+        MetricRecorderFactory.newMetricRecorder(
+            true,
+            () -> {
+              throw new IOException("no credentials");
+            },
+            client,
+            INSTANCE_NAME,
+            "uid");
+
+    assertThat(recorder).isInstanceOf(CompositeMetricRecorder.class);
+    assertThat(((CompositeMetricRecorder) recorder).getDelegates()).hasSize(1);
+    assertThat(recorder.isEnabled()).isTrue();
+  }
+
+  @Test
+  public void testCombineEmptyReturnsNullRecorder() {
+    MetricRecorder recorder = MetricRecorderFactory.combine(Collections.emptyList(), true);
+
+    assertThat(recorder).isInstanceOf(NullMetricRecorder.class);
+  }
+
+  @Test
+  public void testCombineSingleReturnsDelegateWhenNotIsolated() {
+    MetricRecorder only = new FakeMetricRecorder();
+
+    MetricRecorder recorder = MetricRecorderFactory.combine(Collections.singletonList(only), false);
+
+    assertThat(recorder).isSameInstanceAs(only);
+  }
+
+  @Test
+  public void testCombineManyReturnsComposite() {
+    MetricRecorder recorder =
+        MetricRecorderFactory.combine(
+            Arrays.asList(new FakeMetricRecorder(), new FakeMetricRecorder()), false);
+
+    assertThat(recorder).isInstanceOf(CompositeMetricRecorder.class);
+    assertThat(((CompositeMetricRecorder) recorder).getDelegates()).hasSize(2);
+  }
+
+  @Test
+  public void testNoMeterProviderReturnsNoClientRecorder() {
+    assertThat(MetricRecorderFactory.newClientMetricRecorder(null)).isNull();
+  }
+
+  @Test
+  public void testBrokenMeterProviderReturnsNoClientRecorder() {
+    MeterProvider broken =
+        name -> {
+          throw new IllegalStateException("broken provider");
+        };
+
+    assertThat(MetricRecorderFactory.newClientMetricRecorder(broken)).isNull();
+  }
+
+  private static MetricExporter noExporter() {
+    throw new AssertionError("the exporter must not be built when built-in metrics are disabled");
   }
 }

@@ -18,6 +18,7 @@ package com.google.cloud.alloydb;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.common.base.Objects;
+import io.opentelemetry.api.metrics.MeterProvider;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -37,6 +38,8 @@ public class ConnectorConfig {
   private final String googleCredentialsPath;
   private final String quotaProject;
   private final RefreshStrategy refreshStrategy;
+  private final boolean builtInTelemetryEnabled;
+  private final MeterProvider meterProvider;
 
   private ConnectorConfig(
       String targetPrincipal,
@@ -47,7 +50,9 @@ public class ConnectorConfig {
       GoogleCredentials googleCredentials,
       String googleCredentialsPath,
       String quotaProject,
-      RefreshStrategy refreshStrategy) {
+      RefreshStrategy refreshStrategy,
+      boolean builtInTelemetryEnabled,
+      MeterProvider meterProvider) {
     this.targetPrincipal = targetPrincipal;
     this.delegates = delegates;
     this.adminServiceEndpoint = adminServiceEndpoint;
@@ -57,6 +62,8 @@ public class ConnectorConfig {
     this.googleCredentialsPath = googleCredentialsPath;
     this.quotaProject = quotaProject;
     this.refreshStrategy = refreshStrategy;
+    this.builtInTelemetryEnabled = builtInTelemetryEnabled;
+    this.meterProvider = meterProvider;
   }
 
   @Override
@@ -76,7 +83,9 @@ public class ConnectorConfig {
         && Objects.equal(googleCredentials, that.googleCredentials)
         && Objects.equal(googleCredentialsPath, that.googleCredentialsPath)
         && Objects.equal(quotaProject, that.quotaProject)
-        && Objects.equal(refreshStrategy, that.refreshStrategy);
+        && Objects.equal(refreshStrategy, that.refreshStrategy)
+        && builtInTelemetryEnabled == that.builtInTelemetryEnabled
+        && Objects.equal(meterProvider, that.meterProvider);
   }
 
   @Override
@@ -90,7 +99,9 @@ public class ConnectorConfig {
         googleCredentials,
         googleCredentialsPath,
         quotaProject,
-        refreshStrategy);
+        refreshStrategy,
+        builtInTelemetryEnabled,
+        meterProvider);
   }
 
   public String getTargetPrincipal() {
@@ -129,6 +140,16 @@ public class ConnectorConfig {
     return refreshStrategy;
   }
 
+  /** Whether the connector exports its metrics to Cloud Monitoring. */
+  public boolean isBuiltInTelemetryEnabled() {
+    return builtInTelemetryEnabled;
+  }
+
+  /** The application's metrics provider that also receives connector metrics, or null if none. */
+  public MeterProvider getMeterProvider() {
+    return meterProvider;
+  }
+
   /** The builder for the ConnectionConfig. */
   public static class Builder {
 
@@ -141,6 +162,8 @@ public class ConnectorConfig {
     private String googleCredentialsPath;
     private String quotaProject;
     private RefreshStrategy refreshStrategy;
+    private boolean builtInTelemetryEnabled;
+    private MeterProvider meterProvider;
 
     public Builder withTargetPrincipal(String targetPrincipal) {
       this.targetPrincipal = targetPrincipal;
@@ -188,6 +211,25 @@ public class ConnectorConfig {
       return this;
     }
 
+    /**
+     * Sets whether the connector exports its metrics to Cloud Monitoring. Defaults to false. This
+     * setting is independent of {@link #withMeterProvider}.
+     */
+    public Builder withEnableBuiltInTelemetry(boolean builtInTelemetryEnabled) {
+      this.builtInTelemetryEnabled = builtInTelemetryEnabled;
+      return this;
+    }
+
+    /**
+     * Sets an application-owned OpenTelemetry {@link MeterProvider} that also receives the
+     * connector's metrics. The connector never shuts down, closes, or flushes this provider; the
+     * application remains responsible for its lifecycle.
+     */
+    public Builder withMeterProvider(MeterProvider meterProvider) {
+      this.meterProvider = meterProvider;
+      return this;
+    }
+
     /** Builds a new instance of {@code ConnectionConfig}. */
     public ConnectorConfig build() {
       // validate only one GoogleCredentials configuration field set
@@ -220,7 +262,9 @@ public class ConnectorConfig {
           googleCredentials,
           googleCredentialsPath,
           quotaProject,
-          refreshStrategy);
+          refreshStrategy,
+          builtInTelemetryEnabled,
+          meterProvider);
     }
   }
 }
