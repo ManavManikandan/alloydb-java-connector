@@ -64,6 +64,15 @@ the background certificate refresh. To enable it, add the following to the file
 logging.level.com.google.cloud.alloydb=DEBUG
 ```
 
+### Metrics
+
+The Java Connector can record metrics about dials, open connections, bytes
+transferred, and certificate refreshes through your application's own
+OpenTelemetry `MeterProvider`, so you can export them with any OpenTelemetry
+exporter. See [Connector Metrics and Telemetry][telemetry-doc].
+
+[telemetry-doc]: docs/telemetry.md
+
 ## Support policy
 
 ### Major version lifecycle
