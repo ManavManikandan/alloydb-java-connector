@@ -17,6 +17,7 @@
 package com.google.cloud.alloydb;
 
 import com.google.cloud.alloydb.v1alpha.InstanceName;
+import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.MeterProvider;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import java.io.IOException;
@@ -43,12 +44,12 @@ class MetricRecorderFactory {
    *
    * @param builtInEnabled whether to export to Cloud Monitoring
    * @param exporterSupplier supplies the project's shared Cloud Monitoring exporter
-   * @param clientRecorder the recorder for the application's own provider, or null if none
+   * @param globalRecorder the recorder for the global OpenTelemetry provider, or null if none
    */
   static MetricRecorder newMetricRecorder(
       boolean builtInEnabled,
       MetricExporterSupplier exporterSupplier,
-      ClientMetricRecorder clientRecorder,
+      GlobalMetricRecorder globalRecorder,
       InstanceName instanceName,
       String clientUid) {
     List<MetricRecorder> recorders = new ArrayList<>(2);
@@ -64,10 +65,10 @@ class MetricRecorderFactory {
     if (builtIn.isEnabled()) {
       recorders.add(builtIn);
     }
-    if (clientRecorder != null) {
-      recorders.add(clientRecorder.forInstance(instanceName));
+    if (globalRecorder != null) {
+      recorders.add(globalRecorder.forInstance(instanceName));
     }
-    return combine(recorders, clientRecorder != null);
+    return combine(recorders, globalRecorder != null);
   }
 
   /**
@@ -118,25 +119,80 @@ class MetricRecorderFactory {
     }
   }
 
+  // The system property and environment variable that opt an application into OpenTelemetry SDK
+  // autoconfiguration on first access to the global instance.
+  static final String GLOBAL_AUTOCONFIGURE_PROPERTY = "otel.java.global-autoconfigure.enabled";
+  static final String GLOBAL_AUTOCONFIGURE_ENV = "OTEL_JAVA_GLOBAL_AUTOCONFIGURE_ENABLED";
+
   /**
-   * Creates the recorder for an application-provided {@link MeterProvider}, or returns null when
-   * none is configured or its instruments cannot be created.
+   * Creates the recorder for the global OpenTelemetry provider, or returns null when the
+   * application has not installed one yet or its instruments cannot be created.
    */
-  static ClientMetricRecorder newClientMetricRecorder(MeterProvider meterProvider) {
+  static GlobalMetricRecorder newGlobalMetricRecorder() {
+    MeterProvider meterProvider;
+    try {
+      meterProvider = globalMeterProvider();
+    } catch (Throwable t) {
+      logger.warn(
+          "Global OpenTelemetry metrics are disabled: the global MeterProvider could not be "
+              + "obtained ({}). Connections are unaffected.",
+          t.toString());
+      logger.debug("Global OpenTelemetry metrics failed to initialize.", t);
+      return null;
+    }
+    return newGlobalMetricRecorder(meterProvider);
+  }
+
+  /**
+   * Creates the recorder for the given provider, or returns null when it is null or its instruments
+   * cannot be created.
+   */
+  static GlobalMetricRecorder newGlobalMetricRecorder(MeterProvider meterProvider) {
     if (meterProvider == null) {
       return null;
     }
     try {
-      return new ClientMetricRecorder(meterProvider);
+      return new GlobalMetricRecorder(meterProvider);
     } catch (Throwable t) {
       // As with the built-in exporter, a broken provider must never stop a connection.
       logger.warn(
-          "Client metrics are disabled: instruments could not be created on the configured "
-              + "MeterProvider ({}). Connections are unaffected.",
+          "Global OpenTelemetry metrics are disabled: instruments could not be created on the "
+              + "global MeterProvider ({}). Connections are unaffected.",
           t.toString());
-      logger.debug("Client metrics failed to initialize.", t);
+      logger.debug("Global OpenTelemetry metrics failed to initialize.", t);
       return null;
     }
+  }
+
+  /**
+   * Returns the application's global {@link MeterProvider}, or null when the application has not
+   * installed one.
+   *
+   * <p>{@link GlobalOpenTelemetry#get} installs a no-op instance when nothing is set yet, after
+   * which the application's own {@code GlobalOpenTelemetry.set} call fails. So the global is read
+   * only once the application has set it, or when the application opted into autoconfiguration,
+   * which runs on first access by design.
+   */
+  static MeterProvider globalMeterProvider() {
+    boolean isSet;
+    try {
+      isSet = GlobalOpenTelemetry.isSet();
+    } catch (NoSuchMethodError e) {
+      // Older opentelemetry-api versions lack isSet(). Fall back to the standard lookup.
+      return GlobalOpenTelemetry.getMeterProvider();
+    }
+    if (isSet || isGlobalAutoconfigureEnabled()) {
+      return GlobalOpenTelemetry.getMeterProvider();
+    }
+    return null;
+  }
+
+  private static boolean isGlobalAutoconfigureEnabled() {
+    String value = System.getProperty(GLOBAL_AUTOCONFIGURE_PROPERTY);
+    if (value == null) {
+      value = System.getenv(GLOBAL_AUTOCONFIGURE_ENV);
+    }
+    return Boolean.parseBoolean(value);
   }
 
   private MetricRecorderFactory() {}

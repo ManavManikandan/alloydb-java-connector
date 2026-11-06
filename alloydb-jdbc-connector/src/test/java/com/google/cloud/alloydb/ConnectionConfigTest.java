@@ -93,7 +93,19 @@ public class ConnectionConfigTest {
     ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
 
     assertThat(config.getConnectorConfig().isBuiltInTelemetryEnabled()).isFalse();
-    assertThat(config.getConnectorConfig().getMeterProvider()).isNull();
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isTrue();
+  }
+
+  @Test
+  public void testConfigFromProps_withGlobalTelemetryDisabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+    props.setProperty(ConnectionConfig.ALLOYDB_ENABLE_GLOBAL_TELEMETRY, "false");
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isFalse();
+    assertThat(config.getConnectorConfig().isBuiltInTelemetryEnabled()).isFalse();
   }
 
   @Test

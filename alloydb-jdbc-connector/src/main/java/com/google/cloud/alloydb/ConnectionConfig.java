@@ -38,6 +38,7 @@ class ConnectionConfig {
   public static final String ALLOYDB_IP_TYPE = "alloydbIpType";
   public static final String ALLOYDB_REFRESH_STRATEGY = "alloydbRefreshStrategy";
   public static final String ALLOYDB_ENABLE_BUILT_IN_TELEMETRY = "alloydbEnableBuiltInTelemetry";
+  public static final String ALLOYDB_ENABLE_GLOBAL_TELEMETRY = "alloydbEnableGlobalTelemetry";
   public static final AuthType DEFAULT_AUTH_TYPE = AuthType.PASSWORD;
   public static final IpType DEFAULT_IP_TYPE = IpType.PRIVATE;
   private final InstanceName instanceName;
@@ -80,6 +81,10 @@ class ConnectionConfig {
     }
     final boolean builtInTelemetryEnabled =
         Boolean.parseBoolean(props.getProperty(ALLOYDB_ENABLE_BUILT_IN_TELEMETRY));
+    // Global telemetry is on unless the application opts out.
+    final String globalTelemetryProp = props.getProperty(ALLOYDB_ENABLE_GLOBAL_TELEMETRY);
+    final boolean globalTelemetryEnabled =
+        globalTelemetryProp == null || Boolean.parseBoolean(globalTelemetryProp);
 
     return new ConnectionConfig(
         instanceName,
@@ -95,6 +100,7 @@ class ConnectionConfig {
             .withQuotaProject(quotaProject)
             .withRefreshStrategy(refreshStrategy)
             .withEnableBuiltInTelemetry(builtInTelemetryEnabled)
+            .withEnableGlobalTelemetry(globalTelemetryEnabled)
             .build());
   }
 

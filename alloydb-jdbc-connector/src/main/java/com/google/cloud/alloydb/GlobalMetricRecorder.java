@@ -26,16 +26,16 @@ import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.MeterProvider;
 
 /**
- * Records connector metrics through a {@link MeterProvider} owned by the application.
+ * Records connector metrics through the application's global OpenTelemetry {@link MeterProvider}.
  *
- * <p>The application's provider describes the application, so AlloyDB target identity is attached
- * to each measurement as attributes rather than to the provider's resource. One instance of this
- * class serves a whole connector; {@link #forInstance} returns the recorder for one target.
+ * <p>The global provider describes the application, so AlloyDB target identity is attached to each
+ * measurement as attributes rather than to the provider's resource. One instance of this class
+ * serves a whole connector; {@link #forInstance} returns the recorder for one target.
  *
- * <p>The connector never shuts down, closes, or flushes the provider: its lifecycle belongs to the
- * application.
+ * <p>The connector never configures, replaces, shuts down, closes, or flushes the provider: its
+ * lifecycle belongs to the application.
  */
-final class ClientMetricRecorder {
+final class GlobalMetricRecorder {
 
   static final String INSTRUMENTATION_SCOPE = "com.google.cloud.alloydb";
 
@@ -90,7 +90,7 @@ final class ClientMetricRecorder {
   private final LongCounter bytesReceived;
   private final LongCounter refreshes;
 
-  ClientMetricRecorder(MeterProvider meterProvider) {
+  GlobalMetricRecorder(MeterProvider meterProvider) {
     Meter meter =
         meterProvider
             .meterBuilder(INSTRUMENTATION_SCOPE)

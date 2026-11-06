@@ -41,7 +41,7 @@ import org.junit.Test;
  * Pins the documented client metric contract in docs/telemetry.md. A failure here means a change to
  * a stable, user-facing contract.
  */
-public class ClientMetricRecorderTest {
+public class GlobalMetricRecorderTest {
 
   private static final InstanceName INSTANCE_A =
       InstanceName.of("project-a", "us-central1", "cluster-a", "instance-a");
@@ -52,13 +52,13 @@ public class ClientMetricRecorderTest {
       Resource.create(Attributes.of(AttributeKey.stringKey("service.name"), "my-app"));
 
   private InMemoryMetricReader reader;
-  private ClientMetricRecorder clientRecorder;
+  private GlobalMetricRecorder globalRecorder;
 
   @Before
   public void setUp() {
     reader = InMemoryMetricReader.create();
-    clientRecorder =
-        new ClientMetricRecorder(
+    globalRecorder =
+        new GlobalMetricRecorder(
             SdkMeterProvider.builder()
                 .setResource(APP_RESOURCE)
                 .registerMetricReader(reader)
@@ -106,7 +106,7 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void publishesTheDocumentedMetricNamesTypesUnitsAndDescriptions() {
-    recordEverything(clientRecorder.forInstance(INSTANCE_A));
+    recordEverything(globalRecorder.forInstance(INSTANCE_A));
 
     Map<String, MetricData> metrics = collect();
 
@@ -169,7 +169,7 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void recordsTheExpectedValues() {
-    MetricRecorder recorder = clientRecorder.forInstance(INSTANCE_A);
+    MetricRecorder recorder = globalRecorder.forInstance(INSTANCE_A);
     recordEverything(recorder);
     recorder.recordBytesTx(1);
     recorder.recordDialLatency(8.0);
@@ -189,7 +189,7 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void attachesTargetIdentityAndEventAttributes() {
-    MetricRecorder recorder = clientRecorder.forInstance(INSTANCE_A);
+    MetricRecorder recorder = globalRecorder.forInstance(INSTANCE_A);
     recorder.recordDialCount(
         TelemetryAttributes.forDial(true, true, TelemetryAttributes.DIAL_TLS_ERROR));
     recorder.recordDialLatency(1);
@@ -227,8 +227,8 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void distinguishesMultipleTargetInstances() {
-    MetricRecorder a = clientRecorder.forInstance(INSTANCE_A);
-    MetricRecorder b = clientRecorder.forInstance(INSTANCE_B);
+    MetricRecorder a = globalRecorder.forInstance(INSTANCE_A);
+    MetricRecorder b = globalRecorder.forInstance(INSTANCE_B);
     a.recordOpenConnection(TelemetryAttributes.forConnection(false));
     a.recordOpenConnection(TelemetryAttributes.forConnection(false));
     b.recordOpenConnection(TelemetryAttributes.forConnection(false));
@@ -241,7 +241,7 @@ public class ClientMetricRecorderTest {
     for (LongPointData point :
         metrics.get("alloydb.connector.connections.open").getLongSumData().getPoints()) {
       openByInstance.put(
-          point.getAttributes().get(ClientMetricRecorder.INSTANCE_ID_KEY), point.getValue());
+          point.getAttributes().get(GlobalMetricRecorder.INSTANCE_ID_KEY), point.getValue());
     }
     assertThat(openByInstance).containsExactly("instance-a", 1L + 1L, "instance-b", 1L);
 
@@ -249,10 +249,10 @@ public class ClientMetricRecorderTest {
     Map<String, Long> bytesByInstance = new HashMap<>();
     for (LongPointData point :
         metrics.get("alloydb.connector.bytes.received").getLongSumData().getPoints()) {
-      String instance = point.getAttributes().get(ClientMetricRecorder.INSTANCE_ID_KEY);
+      String instance = point.getAttributes().get(GlobalMetricRecorder.INSTANCE_ID_KEY);
       bytesByInstance.put(instance, point.getValue());
       locationByInstance.put(
-          instance, point.getAttributes().get(ClientMetricRecorder.LOCATION_KEY));
+          instance, point.getAttributes().get(GlobalMetricRecorder.LOCATION_KEY));
     }
     assertThat(bytesByInstance).containsExactly("instance-a", 10L, "instance-b", 3L);
     assertThat(locationByInstance)
@@ -261,8 +261,8 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void leavesTheApplicationResourceUntouched() {
-    recordEverything(clientRecorder.forInstance(INSTANCE_A));
-    recordEverything(clientRecorder.forInstance(INSTANCE_B));
+    recordEverything(globalRecorder.forInstance(INSTANCE_A));
+    recordEverything(globalRecorder.forInstance(INSTANCE_B));
 
     for (MetricData metric : reader.collectAllMetrics()) {
       assertThat(metric.getResource()).isEqualTo(APP_RESOURCE);
@@ -271,7 +271,7 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void attachesOnlyDocumentedAttributeKeys() {
-    MetricRecorder recorder = clientRecorder.forInstance(INSTANCE_A);
+    MetricRecorder recorder = globalRecorder.forInstance(INSTANCE_A);
     recordEverything(recorder);
     recorder.recordDialCount(
         TelemetryAttributes.forDial(false, true, TelemetryAttributes.DIAL_MDX_ERROR));
@@ -299,7 +299,7 @@ public class ClientMetricRecorderTest {
 
   @Test
   public void instanceRecorderIsEnabledAndNeverShutsDownTheProvider() {
-    MetricRecorder recorder = clientRecorder.forInstance(INSTANCE_A);
+    MetricRecorder recorder = globalRecorder.forInstance(INSTANCE_A);
 
     recorder.shutdown();
     recorder.recordBytesTx(5);
