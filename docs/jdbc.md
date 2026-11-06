@@ -292,15 +292,16 @@ config.addDataSourceProperty("alloydbIpType", "PUBLIC");
 
 ### Metrics
 
-The connector can record metrics about its connections through your
-application's OpenTelemetry `MeterProvider`, so you can export them to
-Prometheus, OTLP, or any other exporter you use. This is the recommended way to
-observe the connector. Configure it on a named connector:
+The connector records metrics about its connections through your
+application's global OpenTelemetry `MeterProvider`. If you configure
+OpenTelemetry at startup, with the Java agent, autoconfiguration, or
+`OpenTelemetrySdk.builder()...buildAndRegisterGlobal()`, connector metrics are
+exported to Prometheus, OTLP, or any other exporter you use with no
+connector-specific setup. To keep connector metrics out of that pipeline, opt
+out:
 
 ```java
-ConnectorRegistry.register(
-    "my-connector",
-    new ConnectorConfig.Builder().withMeterProvider(meterProvider).build());
+config.addDataSourceProperty("alloydbEnableGlobalTelemetry", "false");
 ```
 
 The connector can also export to Cloud Monitoring itself with the

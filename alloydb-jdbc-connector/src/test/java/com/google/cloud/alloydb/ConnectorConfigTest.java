@@ -21,8 +21,6 @@ import static org.junit.Assert.assertThrows;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.common.base.Objects;
-import io.opentelemetry.api.metrics.MeterProvider;
-import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Supplier;
@@ -301,7 +299,7 @@ public class ConnectorConfigTest {
                 wantQuotaProject,
                 RefreshStrategy.REFRESH_AHEAD,
                 false, // builtInTelemetryEnabled
-                null)); // meterProvider
+                true)); // globalTelemetryEnabled
   }
 
   @Test
@@ -309,21 +307,19 @@ public class ConnectorConfigTest {
     ConnectorConfig cc = new ConnectorConfig.Builder().build();
 
     assertThat(cc.isBuiltInTelemetryEnabled()).isFalse();
-    assertThat(cc.getMeterProvider()).isNull();
+    assertThat(cc.isGlobalTelemetryEnabled()).isTrue();
   }
 
   @Test
   public void testTelemetryFromBuilder() {
-    MeterProvider meterProvider = SdkMeterProvider.builder().build();
-
     ConnectorConfig cc =
         new ConnectorConfig.Builder()
             .withEnableBuiltInTelemetry(true)
-            .withMeterProvider(meterProvider)
+            .withEnableGlobalTelemetry(false)
             .build();
 
     assertThat(cc.isBuiltInTelemetryEnabled()).isTrue();
-    assertThat(cc.getMeterProvider()).isSameInstanceAs(meterProvider);
+    assertThat(cc.isGlobalTelemetryEnabled()).isFalse();
   }
 
   @Test
@@ -336,24 +332,11 @@ public class ConnectorConfigTest {
   }
 
   @Test
-  public void testEqual_withSameMeterProvider() {
-    MeterProvider meterProvider = SdkMeterProvider.builder().build();
-    ConnectorConfig k1 = new ConnectorConfig.Builder().withMeterProvider(meterProvider).build();
-    ConnectorConfig k2 = new ConnectorConfig.Builder().withMeterProvider(meterProvider).build();
-
-    assertThat(k1).isEqualTo(k2);
-    assertThat(k1.hashCode()).isEqualTo(k2.hashCode());
-  }
-
-  @Test
-  public void testNotEqual_withDifferentMeterProviders() {
-    ConnectorConfig k1 =
-        new ConnectorConfig.Builder().withMeterProvider(SdkMeterProvider.builder().build()).build();
-    ConnectorConfig k2 =
-        new ConnectorConfig.Builder().withMeterProvider(SdkMeterProvider.builder().build()).build();
-    ConnectorConfig k3 = new ConnectorConfig.Builder().build();
+  public void testNotEqual_withGlobalTelemetryNotEqual() {
+    ConnectorConfig k1 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(true).build();
+    ConnectorConfig k2 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build();
 
     assertThat(k1).isNotEqualTo(k2);
-    assertThat(k1).isNotEqualTo(k3);
+    assertThat(k1.hashCode()).isNotEqualTo(k2.hashCode());
   }
 }

@@ -5,28 +5,32 @@ dial attempts and their latency, open connections, bytes sent and received,
 and refreshes of instance connection info. It can deliver these metrics along
 two independent paths:
 
-- **Your application's OpenTelemetry `MeterProvider` (recommended).** The
-  connector records its metrics through a provider that your application
-  configures and owns. You export them with whatever OpenTelemetry exporters you
-  already use, such as Prometheus, OTLP, or Cloud Monitoring. This is the
-  preferred integration for external observability.
+- **Your application's global OpenTelemetry `MeterProvider`.** The connector
+  records its metrics through `GlobalOpenTelemetry`, the standard OpenTelemetry
+  entry point for libraries. If your application already exports metrics
+  through a global provider, connector metrics show up in that pipeline with no
+  connector-specific setup. This path is on by default.
 - **Built-in Cloud Monitoring export.** The connector runs its own private
   OpenTelemetry pipeline that writes to Cloud Monitoring. It is off by default.
 
 Each path can be enabled on its own, and enabling or disabling one never
-affects the other. When neither is enabled, the connector does no telemetry
-work at all.
+affects the other.
 
-## Recording metrics through your application's MeterProvider
+## Recording metrics through the global provider
 
-A `MeterProvider` is a live object, so you configure it in code on a
-[named connector](configuration.md#named-connectors) with
-`ConnectorConfig.Builder.withMeterProvider()`. There is no JDBC connection
-property for it.
+Configure OpenTelemetry once, during application startup, the same way you
+would for any other instrumented library. Any of these sets the global
+provider:
+
+- The [OpenTelemetry Java agent][java-agent].
+- [SDK autoconfiguration][autoconfigure] with
+  `otel.java.global-autoconfigure.enabled=true`.
+- Building an SDK yourself and calling
+  `OpenTelemetrySdk.builder()...buildAndRegisterGlobal()` or
+  `GlobalOpenTelemetry.set(...)`.
 
 ```java
-// Your application's OpenTelemetry setup. The connector does not create,
-// configure, or own this provider.
+// Application startup, before the first database connection.
 SdkMeterProvider meterProvider =
     SdkMeterProvider.builder()
         .setResource(Resource.getDefault().toBuilder()
@@ -34,46 +38,79 @@ SdkMeterProvider meterProvider =
             .build())
         .registerMetricReader(/* your reader, see the examples below */)
         .build();
-
-ConnectorConfig config =
-    new ConnectorConfig.Builder()
-        .withMeterProvider(meterProvider)
-        .build();
-ConnectorRegistry.register("my-connector", config);
+OpenTelemetrySdk.builder()
+    .setMeterProvider(meterProvider)
+    .buildAndRegisterGlobal();
 ```
 
-Then point your connections at the named connector:
+No connector configuration is needed. Connections made through the JDBC
+`SocketFactory` and through named connectors both record to the global
+provider.
 
-```java
-config.addDataSourceProperty("alloydbNamedConnector", "my-connector");
-```
+If your application has not set a global provider, OpenTelemetry's no-op
+behavior applies: the connector records nothing externally and does no
+per-byte metric work.
 
-If you already use the OpenTelemetry SDK autoconfiguration or the Java agent,
-pass its provider, for example `GlobalOpenTelemetry.get().getMeterProvider()`.
-The connector never reads `GlobalOpenTelemetry` on its own.
+### When the connector reads the global provider
+
+Set the global provider before your application opens its first connection.
+The connector looks up the global provider the first time it dials each AlloyDB
+instance and keeps that recorder for the life of the connector. An instance
+first dialed before the global provider was set does not report through it.
+
+The connector never forces the global provider into existence. In
+OpenTelemetry Java, reading `GlobalOpenTelemetry` before it is set installs a
+no-op instance and makes a later `GlobalOpenTelemetry.set(...)` fail. To avoid
+breaking your startup, the connector reads the global only once it is set, or
+when you have enabled `otel.java.global-autoconfigure.enabled`, where reading it
+is what triggers autoconfiguration.
 
 ### Provider ownership and lifecycle
 
-Your application owns the provider:
+Your application owns the global provider:
 
+- The connector never configures, replaces, or sets the global provider.
 - The connector never calls `shutdown()`, `close()`, or `forceFlush()` on it.
   This holds for `ConnectorRegistry.close()`, `ConnectorRegistry.reset()`,
   `ConnectorRegistry.shutdown()`, and closing a named connector.
 - Shut the provider down yourself when your application exits, after your
   connection pools are closed, so the final measurements are exported.
-- If you shut the provider down while connectors are still running, the
-  connector keeps working and its measurements are discarded.
 - A provider that throws, or that cannot create the connector's instruments,
-  never fails or slows a connection. The connector logs a warning once and
-  continues without client metrics.
+  never fails or slows a connection. The connector logs a warning and
+  continues without global-provider metrics.
+
+### Opting out
+
+To keep connector metrics out of your application's pipeline while still using
+OpenTelemetry elsewhere, turn the global path off. On unnamed connectors, use
+the connection property:
+
+```java
+config.addDataSourceProperty("alloydbEnableGlobalTelemetry", "false");
+```
+
+On a [named connector](configuration.md#named-connectors):
+
+```java
+ConnectorRegistry.register(
+    "my-connector",
+    new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build());
+```
+
+Opting out does not affect built-in Cloud Monitoring export. You can also drop
+the connector's metrics in your SDK or Collector instead, as described in
+[Filtering](#filtering-and-controlling-cardinality).
 
 ### Resource attributes and target identity
 
-Your provider's `Resource` describes your application, so the connector never
-adds anything to it. Instead, every measurement carries the identity of the
-AlloyDB instance it relates to as metric attributes. This means a single
-application connecting to several instances reports one time series per
-instance, under your application's resource.
+The global provider's `Resource` describes your application, so the connector
+never adds anything to it. Instead, every measurement carries the identity of
+the AlloyDB instance it relates to as metric attributes. A single application
+connecting to several instances reports one time series per instance, under
+your application's resource.
+
+[java-agent]: https://opentelemetry.io/docs/zero-code/java/agent/
+[autoconfigure]: https://opentelemetry.io/docs/languages/java/configuration/
 
 ## Metric contract
 
@@ -95,6 +132,8 @@ Notes:
 - `alloydb.connector.dial.duration` is recorded only for successful dials.
   Failed dials are counted in `alloydb.connector.dials` with their failure
   `status`.
+- No per-connector or per-process identifier, such as the connector's client
+  UID, is attached. Series are distinguished only by the attributes below.
 - Byte counts are the PostgreSQL protocol bytes your application exchanges with
   the instance. They exclude TLS framing and the connector's metadata exchange.
 
@@ -125,12 +164,12 @@ error messages, or credentials to metrics.
 
 ### Relation to the built-in Cloud Monitoring metrics
 
-The client metrics are the same measurements as the built-in metrics, under
+The global-provider metrics are the same measurements as the built-in metrics, under
 OpenTelemetry-style names. The built-in pipeline instead identifies the
 instance through the Cloud Monitoring `alloydb.googleapis.com/InstanceClient`
 monitored resource.
 
-| Client metric | Built-in metric (`alloydb.googleapis.com/client/connector/`) |
+| Global-provider metric | Built-in metric (`alloydb.googleapis.com/client/connector/`) |
 |---------------|--------------------------------------------------------------|
 | `alloydb.connector.dials` | `dial_count` |
 | `alloydb.connector.dial.duration` | `dial_latencies` |
@@ -141,9 +180,15 @@ monitored resource.
 
 ## Filtering and controlling cardinality
 
-Use OpenTelemetry SDK views on your provider to filter the connector's metrics.
-Each AlloyDB instance produces its own time series. If you connect to many
-instances, you can aggregate across them by dropping per-instance attributes:
+All connector metrics use the instrumentation scope (meter name)
+`com.google.cloud.alloydb`, so you can select them in your SDK or in an
+OpenTelemetry Collector.
+
+### In the application SDK
+
+Use views on your provider. Each AlloyDB instance produces its own time
+series. If you connect to many instances, aggregate across them by dropping
+per-instance attributes:
 
 ```java
 SdkMeterProvider meterProvider =
@@ -178,23 +223,41 @@ When more than one view matches an instrument, the SDK produces a separate
 stream for each view, so combine your filters into a single view per
 instrument.
 
+### In an OpenTelemetry Collector
+
+Use the `filter` processor to drop connector metrics, or the `transform`
+processor to remove attributes:
+
+```yaml
+processors:
+  filter/alloydb:
+    metrics:
+      metric:
+        - 'instrumentation_scope.name == "com.google.cloud.alloydb" and IsMatch(name, "alloydb\\.connector\\.bytes\\..*")'
+  transform/alloydb:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - delete_key(attributes, "alloydb.instance_id") where instrumentation_scope.name == "com.google.cloud.alloydb"
+```
+
 ## Export examples
 
 ### Prometheus
 
-Add `io.opentelemetry:opentelemetry-exporter-prometheus` to your application,
-then register a Prometheus reader on your provider:
+Add `io.opentelemetry:opentelemetry-exporter-prometheus` to your application
+and register a Prometheus reader on the global provider:
 
 ```java
-SdkMeterProvider meterProvider =
-    SdkMeterProvider.builder()
-        .registerMetricReader(PrometheusHttpServer.builder().setPort(9464).build())
-        .build();
-
-ConnectorRegistry.register(
-    "my-connector",
-    new ConnectorConfig.Builder().withMeterProvider(meterProvider).build());
+OpenTelemetrySdk.builder()
+    .setMeterProvider(
+        SdkMeterProvider.builder()
+            .registerMetricReader(PrometheusHttpServer.builder().setPort(9464).build())
+            .build())
+    .buildAndRegisterGlobal();
 ```
+
+With the Java agent, set `OTEL_METRICS_EXPORTER=prometheus` instead.
 
 Prometheus scrapes `http://<host>:9464/metrics`. The exporter converts names
 to Prometheus conventions: dots become underscores, units become suffixes, and
@@ -204,10 +267,10 @@ counters get `_total`. For example, `alloydb.connector.dials` becomes
 exporter version. Attribute dots also become underscores, for example
 `alloydb_instance_id`.
 
-### OTLP
+### OTLP and the OpenTelemetry Collector
 
-Add `io.opentelemetry:opentelemetry-exporter-otlp` to your application, then
-export periodically to an OpenTelemetry Collector or any OTLP endpoint:
+Add `io.opentelemetry:opentelemetry-exporter-otlp` to your application and
+export periodically to a Collector or any OTLP endpoint:
 
 ```java
 SdkMeterProvider meterProvider =
@@ -220,13 +283,32 @@ SdkMeterProvider meterProvider =
                 .setInterval(Duration.ofSeconds(60))
                 .build())
         .build();
-
-ConnectorRegistry.register(
-    "my-connector",
-    new ConnectorConfig.Builder().withMeterProvider(meterProvider).build());
+OpenTelemetrySdk.builder().setMeterProvider(meterProvider).buildAndRegisterGlobal();
 
 // On application shutdown, after closing connection pools:
 meterProvider.close();
+```
+
+With the Java agent or autoconfiguration, set `OTEL_METRICS_EXPORTER=otlp` and
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`.
+
+A minimal Collector configuration that receives OTLP and exposes the metrics to
+Prometheus:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheus]
 ```
 
 ## Built-in Cloud Monitoring export
@@ -241,5 +323,6 @@ The built-in export writes to the AlloyDB instance's project and needs the
 `monitoring.timeSeries.create` permission. If the exporter cannot start, the
 connector logs a warning and connects without built-in metrics.
 
-Built-in export and a client `MeterProvider` can be used together. Turning
-built-in export off never turns off client metrics.
+Built-in export and the global provider can be used together. Turning built-in
+export off never turns off global-provider metrics, and opting out of the
+global provider never turns off built-in export.

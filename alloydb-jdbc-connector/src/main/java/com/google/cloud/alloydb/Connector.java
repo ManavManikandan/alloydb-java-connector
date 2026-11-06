@@ -41,8 +41,9 @@ class Connector {
   private final String userAgents;
   private final String clientUid;
   private final ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders;
-  // Null when the application has not configured a MeterProvider.
-  private final ClientMetricRecorder clientMetricRecorder;
+  // Resolved on first use rather than at construction, because the application may install its
+  // global OpenTelemetry provider after the connector is created. Null until then.
+  private volatile GlobalMetricRecorder globalMetricRecorder;
 
   Connector(
       ConnectorConfig config,
@@ -63,8 +64,6 @@ class Connector {
     this.userAgents = userAgents;
     this.clientUid = UUID.randomUUID().toString();
     this.metricRecorders = new ConcurrentHashMap<>();
-    this.clientMetricRecorder =
-        MetricRecorderFactory.newClientMetricRecorder(config.getMeterProvider());
   }
 
   public ConnectorConfig getConfig() {
@@ -77,7 +76,7 @@ class Connector {
     this.instances.clear();
     this.connectionInfoRepo.close();
     // Shut down all metric recorders. One recorder failing to shut down must not leave the rest
-    // of them running. The application's MeterProvider is never shut down here: it belongs to the
+    // of them running. The global MeterProvider is never shut down here: it belongs to the
     // application.
     this.metricRecorders.forEach(
         (key, mr) -> {
@@ -166,13 +165,28 @@ class Connector {
     // any race instead.
     MetricRecorder created =
         MetricRecorderFactory.newMetricRecorder(
-            config.isBuiltInTelemetryEnabled(), clientMetricRecorder, instanceName, clientUid);
+            config.isBuiltInTelemetryEnabled(), getGlobalMetricRecorder(), instanceName, clientUid);
     MetricRecorder raced = metricRecorders.putIfAbsent(instanceName, created);
     if (raced != null) {
       created.shutdown();
       return raced;
     }
     return created;
+  }
+
+  /** Returns the recorder for the global provider, or null if it is disabled or not yet set. */
+  private GlobalMetricRecorder getGlobalMetricRecorder() {
+    if (!config.isGlobalTelemetryEnabled()) {
+      return null;
+    }
+    GlobalMetricRecorder recorder = globalMetricRecorder;
+    if (recorder == null) {
+      // Racing callers may each build one. That is harmless: OpenTelemetry returns the same
+      // instruments for the same meter and instrument names.
+      recorder = MetricRecorderFactory.newGlobalMetricRecorder();
+      globalMetricRecorder = recorder;
+    }
+    return recorder;
   }
 
   ConnectionInfoCache getConnection(ConnectionConfig config, MetricRecorder metricRecorder) {

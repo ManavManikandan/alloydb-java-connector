@@ -19,15 +19,26 @@ package com.google.cloud.alloydb;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.cloud.alloydb.v1alpha.InstanceName;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.metrics.MeterProvider;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import java.util.Arrays;
 import java.util.Collections;
+import org.junit.After;
 import org.junit.Test;
 
 public class MetricRecorderFactoryTest {
 
   private static final InstanceName INSTANCE_NAME =
       InstanceName.parse("projects/project/locations/region/clusters/cluster/instances/instance");
+
+  @After
+  public void resetGlobal() {
+    GlobalOpenTelemetry.resetForTest();
+    System.clearProperty(MetricRecorderFactory.GLOBAL_AUTOCONFIGURE_PROPERTY);
+  }
 
   @Test
   public void testDisabledReturnsNullRecorder() {
@@ -61,11 +72,11 @@ public class MetricRecorderFactoryTest {
   }
 
   @Test
-  public void testClientOnlyIsAlwaysIsolated() {
-    ClientMetricRecorder client = new ClientMetricRecorder(MeterProvider.noop());
+  public void testGlobalOnlyIsAlwaysIsolated() {
+    GlobalMetricRecorder global = new GlobalMetricRecorder(MeterProvider.noop());
 
     MetricRecorder recorder =
-        MetricRecorderFactory.newMetricRecorder(false, client, INSTANCE_NAME, "uid");
+        MetricRecorderFactory.newMetricRecorder(false, global, INSTANCE_NAME, "uid");
 
     assertThat(recorder).isInstanceOf(CompositeMetricRecorder.class);
     assertThat(((CompositeMetricRecorder) recorder).getDelegates()).hasSize(1);
@@ -73,13 +84,13 @@ public class MetricRecorderFactoryTest {
   }
 
   @Test
-  public void testBuiltInFailureStillLeavesClientPath() {
-    ClientMetricRecorder client = new ClientMetricRecorder(MeterProvider.noop());
+  public void testBuiltInFailureStillLeavesGlobalPath() {
+    GlobalMetricRecorder global = new GlobalMetricRecorder(MeterProvider.noop());
     // A blank project id makes the Cloud Monitoring exporter fail to initialize.
     InstanceName blankProject = InstanceName.of("", "region", "cluster", "instance");
 
     MetricRecorder recorder =
-        MetricRecorderFactory.newMetricRecorder(true, client, blankProject, "uid");
+        MetricRecorderFactory.newMetricRecorder(true, global, blankProject, "uid");
 
     assertThat(recorder).isInstanceOf(CompositeMetricRecorder.class);
     assertThat(((CompositeMetricRecorder) recorder).getDelegates()).hasSize(1);
@@ -113,17 +124,47 @@ public class MetricRecorderFactoryTest {
   }
 
   @Test
-  public void testNoMeterProviderReturnsNoClientRecorder() {
-    assertThat(MetricRecorderFactory.newClientMetricRecorder(null)).isNull();
+  public void testNullMeterProviderReturnsNoGlobalRecorder() {
+    assertThat(MetricRecorderFactory.newGlobalMetricRecorder(null)).isNull();
   }
 
   @Test
-  public void testBrokenMeterProviderReturnsNoClientRecorder() {
+  public void testUnsetGlobalReturnsNoGlobalRecorderAndLeavesGlobalUnset() {
+    assertThat(MetricRecorderFactory.newGlobalMetricRecorder()).isNull();
+
+    // Reading the global must not install a no-op instance, or the application's later
+    // GlobalOpenTelemetry.set call would fail.
+    assertThat(GlobalOpenTelemetry.isSet()).isFalse();
+    OpenTelemetry sdk = OpenTelemetrySdk.builder().build();
+    GlobalOpenTelemetry.set(sdk);
+  }
+
+  @Test
+  public void testSetGlobalReturnsGlobalRecorder() {
+    SdkMeterProvider meterProvider = SdkMeterProvider.builder().build();
+    GlobalOpenTelemetry.set(OpenTelemetrySdk.builder().setMeterProvider(meterProvider).build());
+
+    assertThat(MetricRecorderFactory.globalMeterProvider()).isNotNull();
+    assertThat(MetricRecorderFactory.newGlobalMetricRecorder()).isNotNull();
+  }
+
+  @Test
+  public void testAutoconfigureOptInReadsTheGlobal() {
+    System.setProperty(MetricRecorderFactory.GLOBAL_AUTOCONFIGURE_PROPERTY, "true");
+
+    // Autoconfiguration is not on the test classpath, so the standard lookup yields a no-op
+    // provider. What matters is that the connector defers to the standard lookup.
+    assertThat(MetricRecorderFactory.globalMeterProvider()).isNotNull();
+    assertThat(GlobalOpenTelemetry.isSet()).isTrue();
+  }
+
+  @Test
+  public void testBrokenMeterProviderReturnsNoGlobalRecorder() {
     MeterProvider broken =
         name -> {
           throw new IllegalStateException("broken provider");
         };
 
-    assertThat(MetricRecorderFactory.newClientMetricRecorder(broken)).isNull();
+    assertThat(MetricRecorderFactory.newGlobalMetricRecorder(broken)).isNull();
   }
 }

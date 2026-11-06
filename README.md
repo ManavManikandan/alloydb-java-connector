@@ -66,10 +66,11 @@ logging.level.com.google.cloud.alloydb=DEBUG
 
 ### Metrics
 
-The Java Connector can record metrics about dials, open connections, bytes
-transferred, and certificate refreshes through your application's own
-OpenTelemetry `MeterProvider`, so you can export them with any OpenTelemetry
-exporter. See [Connector Metrics and Telemetry][telemetry-doc].
+The Java Connector records metrics about dials, open connections, bytes
+transferred, and certificate refreshes through your application's global
+OpenTelemetry `MeterProvider`. If your application already exports metrics with
+OpenTelemetry, connector metrics appear there with no extra setup. See
+[Connector Metrics and Telemetry][telemetry-doc].
 
 [telemetry-doc]: docs/telemetry.md
 

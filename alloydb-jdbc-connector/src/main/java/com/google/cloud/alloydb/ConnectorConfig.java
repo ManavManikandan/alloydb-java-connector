@@ -18,7 +18,6 @@ package com.google.cloud.alloydb;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.common.base.Objects;
-import io.opentelemetry.api.metrics.MeterProvider;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -39,7 +38,7 @@ public class ConnectorConfig {
   private final String quotaProject;
   private final RefreshStrategy refreshStrategy;
   private final boolean builtInTelemetryEnabled;
-  private final MeterProvider meterProvider;
+  private final boolean globalTelemetryEnabled;
 
   private ConnectorConfig(
       String targetPrincipal,
@@ -52,7 +51,7 @@ public class ConnectorConfig {
       String quotaProject,
       RefreshStrategy refreshStrategy,
       boolean builtInTelemetryEnabled,
-      MeterProvider meterProvider) {
+      boolean globalTelemetryEnabled) {
     this.targetPrincipal = targetPrincipal;
     this.delegates = delegates;
     this.adminServiceEndpoint = adminServiceEndpoint;
@@ -63,7 +62,7 @@ public class ConnectorConfig {
     this.quotaProject = quotaProject;
     this.refreshStrategy = refreshStrategy;
     this.builtInTelemetryEnabled = builtInTelemetryEnabled;
-    this.meterProvider = meterProvider;
+    this.globalTelemetryEnabled = globalTelemetryEnabled;
   }
 
   @Override
@@ -85,7 +84,7 @@ public class ConnectorConfig {
         && Objects.equal(quotaProject, that.quotaProject)
         && Objects.equal(refreshStrategy, that.refreshStrategy)
         && builtInTelemetryEnabled == that.builtInTelemetryEnabled
-        && Objects.equal(meterProvider, that.meterProvider);
+        && globalTelemetryEnabled == that.globalTelemetryEnabled;
   }
 
   @Override
@@ -101,7 +100,7 @@ public class ConnectorConfig {
         quotaProject,
         refreshStrategy,
         builtInTelemetryEnabled,
-        meterProvider);
+        globalTelemetryEnabled);
   }
 
   public String getTargetPrincipal() {
@@ -145,9 +144,9 @@ public class ConnectorConfig {
     return builtInTelemetryEnabled;
   }
 
-  /** The application's metrics provider that also receives connector metrics, or null if none. */
-  public MeterProvider getMeterProvider() {
-    return meterProvider;
+  /** Whether the connector records its metrics through the global OpenTelemetry provider. */
+  public boolean isGlobalTelemetryEnabled() {
+    return globalTelemetryEnabled;
   }
 
   /** The builder for the ConnectionConfig. */
@@ -163,7 +162,7 @@ public class ConnectorConfig {
     private String quotaProject;
     private RefreshStrategy refreshStrategy;
     private boolean builtInTelemetryEnabled;
-    private MeterProvider meterProvider;
+    private boolean globalTelemetryEnabled = true;
 
     public Builder withTargetPrincipal(String targetPrincipal) {
       this.targetPrincipal = targetPrincipal;
@@ -213,7 +212,7 @@ public class ConnectorConfig {
 
     /**
      * Sets whether the connector exports its metrics to Cloud Monitoring. Defaults to false. This
-     * setting is independent of {@link #withMeterProvider}.
+     * setting is independent of {@link #withEnableGlobalTelemetry}.
      */
     public Builder withEnableBuiltInTelemetry(boolean builtInTelemetryEnabled) {
       this.builtInTelemetryEnabled = builtInTelemetryEnabled;
@@ -221,12 +220,14 @@ public class ConnectorConfig {
     }
 
     /**
-     * Sets an application-owned OpenTelemetry {@link MeterProvider} that also receives the
-     * connector's metrics. The connector never shuts down, closes, or flushes this provider; the
-     * application remains responsible for its lifecycle.
+     * Sets whether the connector records its metrics through the application's global OpenTelemetry
+     * {@code MeterProvider}. Defaults to true. When the application has not configured a global
+     * provider, OpenTelemetry's no-op behavior applies and nothing is exported. The connector never
+     * configures, replaces, flushes, or shuts down the global provider. This setting is independent
+     * of {@link #withEnableBuiltInTelemetry}.
      */
-    public Builder withMeterProvider(MeterProvider meterProvider) {
-      this.meterProvider = meterProvider;
+    public Builder withEnableGlobalTelemetry(boolean globalTelemetryEnabled) {
+      this.globalTelemetryEnabled = globalTelemetryEnabled;
       return this;
     }
 
@@ -264,7 +265,7 @@ public class ConnectorConfig {
           quotaProject,
           refreshStrategy,
           builtInTelemetryEnabled,
-          meterProvider);
+          globalTelemetryEnabled);
     }
   }
 }
