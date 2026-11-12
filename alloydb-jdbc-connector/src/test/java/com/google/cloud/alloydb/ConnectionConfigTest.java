@@ -86,6 +86,40 @@ public class ConnectionConfigTest {
   }
 
   @Test
+  public void testConfigFromProps_builtInTelemetryDefaultsToDisabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isBuiltInTelemetryEnabled()).isFalse();
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isTrue();
+  }
+
+  @Test
+  public void testConfigFromProps_withGlobalTelemetryDisabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+    props.setProperty(ConnectionConfig.ALLOYDB_ENABLE_GLOBAL_TELEMETRY, "false");
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isFalse();
+    assertThat(config.getConnectorConfig().isBuiltInTelemetryEnabled()).isFalse();
+  }
+
+  @Test
+  public void testConfigFromProps_withBuiltInTelemetryEnabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+    props.setProperty(ConnectionConfig.ALLOYDB_ENABLE_BUILT_IN_TELEMETRY, "true");
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isBuiltInTelemetryEnabled()).isTrue();
+  }
+
+  @Test
   public void testConfigFromBuilder() {
     final InstanceName wantInstance = InstanceName.parse(INSTANCE_NAME);
     final String wantNamedConnector = "my-connection";

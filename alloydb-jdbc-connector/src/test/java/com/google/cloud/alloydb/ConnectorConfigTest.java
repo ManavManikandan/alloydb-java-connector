@@ -297,6 +297,46 @@ public class ConnectorConfigTest {
                 null, // googleCredentials
                 wantGoogleCredentialsPath,
                 wantQuotaProject,
-                RefreshStrategy.REFRESH_AHEAD));
+                RefreshStrategy.REFRESH_AHEAD,
+                false, // builtInTelemetryEnabled
+                true)); // globalTelemetryEnabled
+  }
+
+  @Test
+  public void testTelemetryDefaults() {
+    ConnectorConfig cc = new ConnectorConfig.Builder().build();
+
+    assertThat(cc.isBuiltInTelemetryEnabled()).isFalse();
+    assertThat(cc.isGlobalTelemetryEnabled()).isTrue();
+  }
+
+  @Test
+  public void testTelemetryFromBuilder() {
+    ConnectorConfig cc =
+        new ConnectorConfig.Builder()
+            .withEnableBuiltInTelemetry(true)
+            .withEnableGlobalTelemetry(false)
+            .build();
+
+    assertThat(cc.isBuiltInTelemetryEnabled()).isTrue();
+    assertThat(cc.isGlobalTelemetryEnabled()).isFalse();
+  }
+
+  @Test
+  public void testNotEqual_withBuiltInTelemetryNotEqual() {
+    ConnectorConfig k1 = new ConnectorConfig.Builder().withEnableBuiltInTelemetry(true).build();
+    ConnectorConfig k2 = new ConnectorConfig.Builder().withEnableBuiltInTelemetry(false).build();
+
+    assertThat(k1).isNotEqualTo(k2);
+    assertThat(k1.hashCode()).isNotEqualTo(k2.hashCode());
+  }
+
+  @Test
+  public void testNotEqual_withGlobalTelemetryNotEqual() {
+    ConnectorConfig k1 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(true).build();
+    ConnectorConfig k2 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build();
+
+    assertThat(k1).isNotEqualTo(k2);
+    assertThat(k1.hashCode()).isNotEqualTo(k2.hashCode());
   }
 }

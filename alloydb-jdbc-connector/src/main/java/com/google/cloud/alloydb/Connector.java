@@ -41,6 +41,9 @@ class Connector {
   private final String userAgents;
   private final String clientUid;
   private final ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders;
+  // Resolved on first use rather than at construction, because the application may install its
+  // global OpenTelemetry provider after the connector is created. Null until then.
+  private volatile GlobalMetricRecorder globalMetricRecorder;
 
   Connector(
       ConnectorConfig config,
@@ -73,7 +76,8 @@ class Connector {
     this.instances.clear();
     this.connectionInfoRepo.close();
     // Shut down all metric recorders. One recorder failing to shut down must not leave the rest
-    // of them running.
+    // of them running. The global MeterProvider is never shut down here: it belongs to the
+    // application.
     this.metricRecorders.forEach(
         (key, mr) -> {
           try {
@@ -95,9 +99,11 @@ class Connector {
     // Whether the connector already held connection info for this instance before this dial.
     boolean cacheHit = instances.containsKey(config);
 
-    ConnectionInfoCache connectionInfoCache = getConnection(config, metricRecorder);
+    ConnectionInfoCache connectionInfoCache;
     ConnectionInfo connectionInfo;
     try {
+      // getConnection waits for the first refresh, so it fails the same way getConnectionInfo does.
+      connectionInfoCache = getConnection(config, metricRecorder);
       connectionInfo = connectionInfoCache.getConnectionInfo();
     } catch (RuntimeException e) {
       recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_CACHE_ERROR);
@@ -112,7 +118,12 @@ class Connector {
 
       recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_SUCCESS);
       metricRecorder.recordDialLatency((System.nanoTime() - startNanos) / 1_000_000.0);
-      return s;
+      if (!metricRecorder.isEnabled()) {
+        return s;
+      }
+      TelemetryAttributes connectionAttributes = TelemetryAttributes.forConnection(iamAuthn);
+      metricRecorder.recordOpenConnection(connectionAttributes);
+      return new MeteredSocket(s, metricRecorder, connectionAttributes);
     } catch (UserConfigException e) {
       logger.debug(
           String.format("[%s] Connection failed due to user configuration error.", instanceName));
@@ -152,22 +163,30 @@ class Connector {
     // Building a recorder stands up a gRPC channel, which is far too much work to do inside
     // computeIfAbsent while holding a bin lock. Build it outside the map and discard the loser of
     // any race instead.
-    // Metrics stay off until the configuration property that turns them on arrives in a later
-    // change.
     MetricRecorder created =
         MetricRecorderFactory.newMetricRecorder(
-            /* enabled= */ false,
-            instanceName.getProject(),
-            instanceName.getLocation(),
-            instanceName.getCluster(),
-            instanceName.getInstance(),
-            clientUid);
+            config.isBuiltInTelemetryEnabled(), getGlobalMetricRecorder(), instanceName, clientUid);
     MetricRecorder raced = metricRecorders.putIfAbsent(instanceName, created);
     if (raced != null) {
       created.shutdown();
       return raced;
     }
     return created;
+  }
+
+  /** Returns the recorder for the global provider, or null if it is disabled or not yet set. */
+  private GlobalMetricRecorder getGlobalMetricRecorder() {
+    if (!config.isGlobalTelemetryEnabled()) {
+      return null;
+    }
+    GlobalMetricRecorder recorder = globalMetricRecorder;
+    if (recorder == null) {
+      // Racing callers may each build one. That is harmless: OpenTelemetry returns the same
+      // instruments for the same meter and instrument names.
+      recorder = MetricRecorderFactory.newGlobalMetricRecorder();
+      globalMetricRecorder = recorder;
+    }
+    return recorder;
   }
 
   ConnectionInfoCache getConnection(ConnectionConfig config, MetricRecorder metricRecorder) {

@@ -24,6 +24,12 @@ import com.google.cloud.alloydb.v1alpha.InstanceName;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.rpc.Code;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.data.LongPointData;
+import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -33,6 +39,8 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import org.junit.After;
@@ -63,6 +71,7 @@ public class ConnectorTest {
   public void after() {
     // The SSL server is shared by every test in this class, so undo any per-test configuration.
     sslServer.succeedMetadataExchange();
+    GlobalOpenTelemetry.resetForTest();
   }
 
   @AfterClass
@@ -137,6 +146,171 @@ public class ConnectorTest {
     assertThat(ex).hasMessageThat().contains("does not have an address matching type");
     // A misconfigured connection fails the same way every time, so a refresh would not help.
     assertThat(stubConnectionInfoCache.hasForceRefreshed()).isFalse();
+  }
+
+  @Test
+  public void connect_withoutTelemetry_returnsUnwrappedSocket() throws IOException {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    Connector connector = newConnector(config.getConnectorConfig(), mock);
+
+    Socket socket = connector.connect(config);
+
+    assertThat(socket).isNotInstanceOf(MeteredSocket.class);
+    assertThat(readLine(socket)).isEqualTo(SERVER_MESSAGE);
+  }
+
+  @Test
+  public void connect_withGlobalProvider_recordsToGlobalProvider() throws IOException {
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    setGlobalMeterProvider(SdkMeterProvider.builder().registerMetricReader(reader).build());
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    // Built-in telemetry is off by default, which must not turn off the global path.
+    ConnectorConfig connectorConfig = new ConnectorConfig.Builder().build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+
+    Socket socket = connector.connect(config);
+    assertThat(readLine(socket)).isEqualTo(SERVER_MESSAGE);
+
+    assertThat(socket).isInstanceOf(MeteredSocket.class);
+    Map<String, MetricData> metrics = collectByName(reader);
+    assertThat(metrics.keySet())
+        .containsAtLeast(
+            GlobalMetricRecorder.DIALS,
+            GlobalMetricRecorder.DIAL_DURATION,
+            GlobalMetricRecorder.OPEN_CONNECTIONS,
+            GlobalMetricRecorder.BYTES_RECEIVED);
+    LongPointData dial = onlyLongPoint(metrics.get(GlobalMetricRecorder.DIALS));
+    assertThat(dial.getValue()).isEqualTo(1);
+    assertThat(dial.getAttributes().get(GlobalMetricRecorder.STATUS_KEY))
+        .isEqualTo(TelemetryAttributes.DIAL_SUCCESS);
+    assertThat(dial.getAttributes().get(GlobalMetricRecorder.INSTANCE_ID_KEY))
+        .isEqualTo("<INSTANCE>");
+    assertThat(onlyLongPoint(metrics.get(GlobalMetricRecorder.OPEN_CONNECTIONS)).getValue())
+        .isEqualTo(1);
+    assertThat(onlyLongPoint(metrics.get(GlobalMetricRecorder.BYTES_RECEIVED)).getValue())
+        .isAtLeast(SERVER_MESSAGE.length());
+
+    socket.close();
+
+    assertThat(
+            onlyLongPoint(collectByName(reader).get(GlobalMetricRecorder.OPEN_CONNECTIONS))
+                .getValue())
+        .isEqualTo(0);
+  }
+
+  @Test
+  public void connect_withGlobalProvider_recordsFailedDial() {
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    setGlobalMeterProvider(SdkMeterProvider.builder().registerMetricReader(reader).build());
+    MockAlloyDBAdminGrpc mock =
+        new MockAlloyDBAdminGrpc(Code.NOT_FOUND.getNumber(), ERROR_MESSAGE_NOT_FOUND);
+    ConnectorConfig connectorConfig = new ConnectorConfig.Builder().build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+
+    assertThrows(TerminalException.class, () -> connector.connect(config));
+
+    Map<String, MetricData> metrics = collectByName(reader);
+    LongPointData dial = onlyLongPoint(metrics.get(GlobalMetricRecorder.DIALS));
+    assertThat(dial.getAttributes().get(GlobalMetricRecorder.STATUS_KEY))
+        .isEqualTo(TelemetryAttributes.DIAL_CACHE_ERROR);
+    assertThat(metrics).doesNotContainKey(GlobalMetricRecorder.DIAL_DURATION);
+    assertThat(metrics).doesNotContainKey(GlobalMetricRecorder.OPEN_CONNECTIONS);
+  }
+
+  @Test
+  public void connect_withGlobalTelemetryDisabled_recordsNothingToGlobalProvider()
+      throws IOException {
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    setGlobalMeterProvider(SdkMeterProvider.builder().registerMetricReader(reader).build());
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectorConfig connectorConfig =
+        new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+
+    Socket socket = connector.connect(config);
+    assertThat(readLine(socket)).isEqualTo(SERVER_MESSAGE);
+    socket.close();
+
+    assertThat(socket).isNotInstanceOf(MeteredSocket.class);
+    assertThat(reader.collectAllMetrics()).isEmpty();
+  }
+
+  @Test
+  public void connect_withoutGlobalProvider_leavesGlobalUnset() throws IOException {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectorConfig connectorConfig = new ConnectorConfig.Builder().build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+
+    Socket socket = connector.connect(config);
+    assertThat(readLine(socket)).isEqualTo(SERVER_MESSAGE);
+    socket.close();
+
+    assertThat(socket).isNotInstanceOf(MeteredSocket.class);
+    // The connector must not install a global instance, so the application can still set one.
+    assertThat(GlobalOpenTelemetry.isSet()).isFalse();
+  }
+
+  @Test
+  public void connect_globalProviderSetAfterConnectorCreated_isPickedUp() throws IOException {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectorConfig connectorConfig = new ConnectorConfig.Builder().build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    setGlobalMeterProvider(SdkMeterProvider.builder().registerMetricReader(reader).build());
+
+    connector.connect(config).close();
+
+    assertThat(collectByName(reader)).containsKey(GlobalMetricRecorder.DIALS);
+  }
+
+  @Test
+  public void close_doesNotShutDownGlobalProvider() throws IOException {
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    SdkMeterProvider meterProvider =
+        SdkMeterProvider.builder().registerMetricReader(reader).build();
+    setGlobalMeterProvider(meterProvider);
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectorConfig connectorConfig = new ConnectorConfig.Builder().build();
+    ConnectionConfig config = newConnectionConfig(connectorConfig);
+    Connector connector = newConnector(connectorConfig, mock);
+    connector.connect(config).close();
+
+    connector.close();
+
+    // The application's provider must still be collecting after the connector is gone.
+    GlobalOpenTelemetry.getMeter("application").counterBuilder("app.requests").build().add(1);
+    assertThat(collectByName(reader)).containsKey("app.requests");
+  }
+
+  private static void setGlobalMeterProvider(SdkMeterProvider meterProvider) {
+    GlobalOpenTelemetry.set(OpenTelemetrySdk.builder().setMeterProvider(meterProvider).build());
+  }
+
+  private static ConnectionConfig newConnectionConfig(ConnectorConfig connectorConfig) {
+    return new ConnectionConfig.Builder()
+        .withInstanceName(InstanceName.parse(INSTANCE_NAME))
+        .withConnectorConfig(connectorConfig)
+        .build();
+  }
+
+  private static Map<String, MetricData> collectByName(InMemoryMetricReader reader) {
+    Map<String, MetricData> byName = new HashMap<>();
+    for (MetricData metric : reader.collectAllMetrics()) {
+      byName.put(metric.getName(), metric);
+    }
+    return byName;
+  }
+
+  private static LongPointData onlyLongPoint(MetricData metric) {
+    assertThat(metric.getLongSumData().getPoints()).hasSize(1);
+    return metric.getLongSumData().getPoints().iterator().next();
   }
 
   private StubConnectionInfoCache newStubConnectionInfoCache(String ipAddress) throws Exception {

@@ -37,6 +37,8 @@ public class ConnectorConfig {
   private final String googleCredentialsPath;
   private final String quotaProject;
   private final RefreshStrategy refreshStrategy;
+  private final boolean builtInTelemetryEnabled;
+  private final boolean globalTelemetryEnabled;
 
   private ConnectorConfig(
       String targetPrincipal,
@@ -47,7 +49,9 @@ public class ConnectorConfig {
       GoogleCredentials googleCredentials,
       String googleCredentialsPath,
       String quotaProject,
-      RefreshStrategy refreshStrategy) {
+      RefreshStrategy refreshStrategy,
+      boolean builtInTelemetryEnabled,
+      boolean globalTelemetryEnabled) {
     this.targetPrincipal = targetPrincipal;
     this.delegates = delegates;
     this.adminServiceEndpoint = adminServiceEndpoint;
@@ -57,6 +61,8 @@ public class ConnectorConfig {
     this.googleCredentialsPath = googleCredentialsPath;
     this.quotaProject = quotaProject;
     this.refreshStrategy = refreshStrategy;
+    this.builtInTelemetryEnabled = builtInTelemetryEnabled;
+    this.globalTelemetryEnabled = globalTelemetryEnabled;
   }
 
   @Override
@@ -76,7 +82,9 @@ public class ConnectorConfig {
         && Objects.equal(googleCredentials, that.googleCredentials)
         && Objects.equal(googleCredentialsPath, that.googleCredentialsPath)
         && Objects.equal(quotaProject, that.quotaProject)
-        && Objects.equal(refreshStrategy, that.refreshStrategy);
+        && Objects.equal(refreshStrategy, that.refreshStrategy)
+        && builtInTelemetryEnabled == that.builtInTelemetryEnabled
+        && globalTelemetryEnabled == that.globalTelemetryEnabled;
   }
 
   @Override
@@ -90,7 +98,9 @@ public class ConnectorConfig {
         googleCredentials,
         googleCredentialsPath,
         quotaProject,
-        refreshStrategy);
+        refreshStrategy,
+        builtInTelemetryEnabled,
+        globalTelemetryEnabled);
   }
 
   public String getTargetPrincipal() {
@@ -129,6 +139,16 @@ public class ConnectorConfig {
     return refreshStrategy;
   }
 
+  /** Whether the connector exports its metrics to Cloud Monitoring. */
+  public boolean isBuiltInTelemetryEnabled() {
+    return builtInTelemetryEnabled;
+  }
+
+  /** Whether the connector records its metrics through the global OpenTelemetry provider. */
+  public boolean isGlobalTelemetryEnabled() {
+    return globalTelemetryEnabled;
+  }
+
   /** The builder for the ConnectionConfig. */
   public static class Builder {
 
@@ -141,6 +161,8 @@ public class ConnectorConfig {
     private String googleCredentialsPath;
     private String quotaProject;
     private RefreshStrategy refreshStrategy;
+    private boolean builtInTelemetryEnabled;
+    private boolean globalTelemetryEnabled = true;
 
     public Builder withTargetPrincipal(String targetPrincipal) {
       this.targetPrincipal = targetPrincipal;
@@ -188,6 +210,27 @@ public class ConnectorConfig {
       return this;
     }
 
+    /**
+     * Sets whether the connector exports its metrics to Cloud Monitoring. Defaults to false. This
+     * setting is independent of {@link #withEnableGlobalTelemetry}.
+     */
+    public Builder withEnableBuiltInTelemetry(boolean builtInTelemetryEnabled) {
+      this.builtInTelemetryEnabled = builtInTelemetryEnabled;
+      return this;
+    }
+
+    /**
+     * Sets whether the connector records its metrics through the application's global OpenTelemetry
+     * {@code MeterProvider}. Defaults to true. When the application has not configured a global
+     * provider, OpenTelemetry's no-op behavior applies and nothing is exported. The connector never
+     * configures, replaces, flushes, or shuts down the global provider. This setting is independent
+     * of {@link #withEnableBuiltInTelemetry}.
+     */
+    public Builder withEnableGlobalTelemetry(boolean globalTelemetryEnabled) {
+      this.globalTelemetryEnabled = globalTelemetryEnabled;
+      return this;
+    }
+
     /** Builds a new instance of {@code ConnectionConfig}. */
     public ConnectorConfig build() {
       // validate only one GoogleCredentials configuration field set
@@ -220,7 +263,9 @@ public class ConnectorConfig {
           googleCredentials,
           googleCredentialsPath,
           quotaProject,
-          refreshStrategy);
+          refreshStrategy,
+          builtInTelemetryEnabled,
+          globalTelemetryEnabled);
     }
   }
 }

@@ -97,7 +97,26 @@ class CloudMonitoringMetricRecorder implements MetricRecorder {
   CloudMonitoringMetricRecorder(
       String projectId, String location, String cluster, String instance, String clientUid)
       throws IOException {
+    this(newCloudMonitoringMeterProvider(projectId, location, cluster, instance, clientUid));
+  }
 
+  /** Records through the given provider, which this recorder owns and shuts down. */
+  CloudMonitoringMetricRecorder(SdkMeterProvider meterProvider) {
+    this.meterProvider = meterProvider;
+
+    Meter meter = meterProvider.get(METER_NAME);
+
+    this.dialCount = meter.counterBuilder(DIAL_COUNT).build();
+    this.dialLatency = meter.histogramBuilder(DIAL_LATENCY).build();
+    this.openConnections = meter.upDownCounterBuilder(OPEN_CONNECTIONS).build();
+    this.bytesTx = meter.counterBuilder(BYTES_SENT).build();
+    this.bytesRx = meter.counterBuilder(BYTES_RECEIVED).build();
+    this.refreshCount = meter.counterBuilder(REFRESH_COUNT).build();
+  }
+
+  private static SdkMeterProvider newCloudMonitoringMeterProvider(
+      String projectId, String location, String cluster, String instance, String clientUid)
+      throws IOException {
     Resource resource =
         Resource.create(
             Attributes.of(
@@ -139,17 +158,7 @@ class CloudMonitoringMetricRecorder implements MetricRecorder {
             .setInterval(Duration.ofMillis(DEFAULT_EXPORT_INTERVAL_MS))
             .build();
 
-    this.meterProvider =
-        SdkMeterProvider.builder().setResource(resource).registerMetricReader(reader).build();
-
-    Meter meter = meterProvider.get(METER_NAME);
-
-    this.dialCount = meter.counterBuilder(DIAL_COUNT).build();
-    this.dialLatency = meter.histogramBuilder(DIAL_LATENCY).build();
-    this.openConnections = meter.upDownCounterBuilder(OPEN_CONNECTIONS).build();
-    this.bytesTx = meter.counterBuilder(BYTES_SENT).build();
-    this.bytesRx = meter.counterBuilder(BYTES_RECEIVED).build();
-    this.refreshCount = meter.counterBuilder(REFRESH_COUNT).build();
+    return SdkMeterProvider.builder().setResource(resource).registerMetricReader(reader).build();
   }
 
   @Override

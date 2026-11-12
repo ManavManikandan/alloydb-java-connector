@@ -20,6 +20,10 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 
 import com.google.cloud.alloydb.v1alpha.InstanceName;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import java.util.Collections;
 import java.util.Properties;
 import org.junit.Before;
@@ -230,6 +234,29 @@ public class InternalConnectorRegistryTest {
     assertThat(ex)
         .hasMessageThat()
         .contains(String.format("Named connection %s does not exist.", namedConnector));
+  }
+
+  @Test
+  public void closingNamedConnectorAndRegistry_leavesGlobalMeterProviderRunning() {
+    InMemoryMetricReader reader = InMemoryMetricReader.create();
+    SdkMeterProvider meterProvider =
+        SdkMeterProvider.builder().registerMetricReader(reader).build();
+    GlobalOpenTelemetry.set(OpenTelemetrySdk.builder().setMeterProvider(meterProvider).build());
+    try {
+      ConnectorConfig config = new ConnectorConfig.Builder().build();
+      InternalConnectorRegistry.INSTANCE.register("with-global-telemetry", config);
+      InternalConnectorRegistry.INSTANCE.register("also-with-global-telemetry", config);
+
+      InternalConnectorRegistry.INSTANCE.close("with-global-telemetry");
+      InternalConnectorRegistry.INSTANCE.resetInstance();
+
+      // The provider belongs to the application, so it must still be collecting.
+      GlobalOpenTelemetry.getMeter("application").counterBuilder("app.requests").build().add(1);
+      assertThat(reader.collectAllMetrics()).isNotEmpty();
+    } finally {
+      GlobalOpenTelemetry.resetForTest();
+      meterProvider.close();
+    }
   }
 
   @Test
