@@ -18,11 +18,17 @@ package com.google.cloud.alloydb;
 import com.google.cloud.alloydb.v1alpha.InstanceName;
 import com.google.common.base.Objects;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import java.io.IOException;
 import java.net.Socket;
 import java.security.KeyPair;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +36,7 @@ class Connector {
 
   private static final Logger logger = LoggerFactory.getLogger(Connector.class);
   private static final long MIN_RATE_LIMIT_MS = 30000;
+  private static final long METRICS_SHUTDOWN_TIMEOUT_SECONDS = 10;
 
   private final ListeningScheduledExecutorService executor;
   private final ConnectionInfoRepository connectionInfoRepo;
@@ -41,6 +48,12 @@ class Connector {
   private final String userAgents;
   private final String clientUid;
   private final ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders;
+  private final ConcurrentHashMap<String, MetricExporter> metricExporters;
+  private final InstrumentedSocket.Tracker socketTracker;
+  private final Object socketTrackerGuard = new Object();
+
+  @GuardedBy("socketTrackerGuard")
+  private ScheduledFuture<?> socketTrackerTick;
 
   Connector(
       ConnectorConfig config,
@@ -51,6 +64,33 @@ class Connector {
       ConcurrentHashMap<ConnectionConfig, ConnectionInfoCache> instances,
       AccessTokenSupplier accessTokenSupplier,
       String userAgents) {
+    this(
+        config,
+        executor,
+        connectionInfoRepo,
+        clientConnectorKeyPair,
+        connectionInfoCacheFactory,
+        instances,
+        accessTokenSupplier,
+        userAgents,
+        new ConcurrentHashMap<>());
+  }
+
+  /**
+   * Visible for testing, so a test can install a {@link MetricRecorder} for an instance and observe
+   * what the connector records. Production callers use the constructor above, which starts with no
+   * recorders and builds them on demand.
+   */
+  Connector(
+      ConnectorConfig config,
+      ListeningScheduledExecutorService executor,
+      ConnectionInfoRepository connectionInfoRepo,
+      KeyPair clientConnectorKeyPair,
+      ConnectionInfoCacheFactory connectionInfoCacheFactory,
+      ConcurrentHashMap<ConnectionConfig, ConnectionInfoCache> instances,
+      AccessTokenSupplier accessTokenSupplier,
+      String userAgents,
+      ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders) {
     this.config = config;
     this.executor = executor;
     this.connectionInfoRepo = connectionInfoRepo;
@@ -60,7 +100,41 @@ class Connector {
     this.accessTokenSupplier = accessTokenSupplier;
     this.userAgents = userAgents;
     this.clientUid = UUID.randomUUID().toString();
-    this.metricRecorders = new ConcurrentHashMap<>();
+    this.metricRecorders = metricRecorders;
+    this.metricExporters = new ConcurrentHashMap<>();
+    this.socketTracker = new InstrumentedSocket.Tracker();
+  }
+
+  /**
+   * Starts the socket tracker's schedule, if it is not running already: one task for every
+   * connection this connector opens, rather than a reaper thread per connection. It reports the
+   * close of the connections an application abandoned without closing.
+   *
+   * <p>Scheduled on the first instrumented connection rather than with the connector, because until
+   * there is one the task has an empty queue to poll. An application with telemetry disabled never
+   * gets one, and must not pay a repeating task on the executor the connector shares with
+   * certificate refresh for the life of the process.
+   */
+  private void startSocketTracker() {
+    synchronized (socketTrackerGuard) {
+      if (socketTrackerTick != null) {
+        return;
+      }
+      try {
+        socketTrackerTick =
+            executor.scheduleAtFixedRate(
+                socketTracker::tick,
+                InstrumentedSocket.Tracker.REAP_INTERVAL_MILLIS,
+                InstrumentedSocket.Tracker.REAP_INTERVAL_MILLIS,
+                TimeUnit.MILLISECONDS);
+      } catch (RejectedExecutionException e) {
+        // The registry's executor was shut down while this dial was in flight: ConnectorRegistry
+        // checks for shutdown and then releases the lock before it ever reaches this far. A dial
+        // must not fail for want of the reaper, and a connection the application closes properly
+        // reports its own close whether or not anything is scheduled.
+        logger.debug("Could not schedule the socket tracker. The executor is shut down.", e);
+      }
+    }
   }
 
   public ConnectorConfig getConfig() {
@@ -69,6 +143,14 @@ class Connector {
 
   public void close() throws IOException {
     logger.debug("Close all connections and remove them from cache.");
+    synchronized (socketTrackerGuard) {
+      if (socketTrackerTick != null) {
+        socketTrackerTick.cancel(false);
+      }
+    }
+    // One last tick, now that no further one is scheduled: it reports the close of any connection
+    // already collected, which the recorder shutdown below would otherwise discard.
+    this.socketTracker.tick();
     this.instances.forEach((key, c) -> c.close());
     this.instances.clear();
     this.connectionInfoRepo.close();
@@ -83,6 +165,17 @@ class Connector {
           }
         });
     this.metricRecorders.clear();
+    // Only now that every meter provider has stopped, and so had its last chance to flush through
+    // one of these, are the shared exporters safe to shut down.
+    this.metricExporters.forEach(
+        (projectId, exporter) -> {
+          try {
+            exporter.shutdown().join(METRICS_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+          } catch (RuntimeException e) {
+            logger.debug(String.format("[%s] Metric exporter failed to shut down.", projectId), e);
+          }
+        });
+    this.metricExporters.clear();
   }
 
   Socket connect(ConnectionConfig config) throws IOException {
@@ -104,15 +197,17 @@ class Connector {
       throw e;
     }
 
+    Socket s;
     try {
       ConnectionSocket socket =
           new ConnectionSocket(
               connectionInfo, config, clientConnectorKeyPair, accessTokenSupplier, userAgents);
-      Socket s = socket.connect();
-
-      recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_SUCCESS);
-      metricRecorder.recordDialLatency((System.nanoTime() - startNanos) / 1_000_000.0);
-      return s;
+      s = socket.connect();
+    } catch (SSLException e) {
+      logger.debug(String.format("[%s] TLS handshake failed! Trigger a refresh.", instanceName));
+      recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_TLS_ERROR);
+      connectionInfoCache.forceRefresh();
+      throw e;
     } catch (UserConfigException e) {
       logger.debug(
           String.format("[%s] Connection failed due to user configuration error.", instanceName));
@@ -137,6 +232,41 @@ class Connector {
       // next invocation.
       throw e;
     }
+
+    // The dial is complete and every way it can fail has been recorded above. What follows is the
+    // success path's bookkeeping, deliberately outside those handlers: a metric recorder that
+    // throws is not a failed dial, and must not be recorded as one or trigger a refresh. It is
+    // also all done before the socket is wrapped, which leaves nothing between counting the
+    // connection as open and handing it back that could throw and strand a connection counted as
+    // open that can never be closed.
+    try {
+      recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_SUCCESS);
+      metricRecorder.recordDialLatency((System.nanoTime() - startNanos) / 1_000_000.0);
+
+      // When telemetry is disabled there is nothing to count, so hand back the socket itself
+      // rather than paying for an instrumented wrapper on every read and write.
+      if (!metricRecorder.isEnabled()) {
+        return s;
+      }
+      // There is a connection that can be abandoned now, so the tracker needs its schedule.
+      startSocketTracker();
+      return new InstrumentedSocket(
+          s, metricRecorder, TelemetryAttributes.forConnection(iamAuthn), socketTracker);
+    } catch (RuntimeException e) {
+      // Recording telemetry must not leak a connection. The caller never receives this socket, so
+      // nothing else will ever close it.
+      closeQuietly(s, instanceName);
+      throw e;
+    }
+  }
+
+  private static void closeQuietly(Socket socket, InstanceName instanceName) {
+    try {
+      socket.close();
+    } catch (IOException | RuntimeException e) {
+      logger.debug(
+          String.format("[%s] Failed to close a socket no caller received.", instanceName), e);
+    }
   }
 
   private static void recordDial(
@@ -149,20 +279,43 @@ class Connector {
     if (existing != null) {
       return existing;
     }
-    // Building a recorder stands up a gRPC channel, which is far too much work to do inside
-    // computeIfAbsent while holding a bin lock. Build it outside the map and discard the loser of
-    // any race instead.
+    // Building a recorder can stand up a gRPC channel (see getMetricExporter), which is far too
+    // much work to do inside computeIfAbsent while holding a bin lock. Build it outside the map and
+    // discard the loser of any race instead.
     // Metrics stay off until the configuration property that turns them on arrives in a later
     // change.
     MetricRecorder created =
         MetricRecorderFactory.newMetricRecorder(
             /* enabled= */ false,
+            () -> getMetricExporter(instanceName.getProject()),
             instanceName.getProject(),
             instanceName.getLocation(),
             instanceName.getCluster(),
             instanceName.getInstance(),
             clientUid);
     MetricRecorder raced = metricRecorders.putIfAbsent(instanceName, created);
+    if (raced != null) {
+      created.shutdown();
+      return raced;
+    }
+    return created;
+  }
+
+  /**
+   * Returns the Cloud Monitoring exporter for {@code projectId}, creating it if necessary. Every
+   * instance in a project shares one, so an application connecting to N instances pays for one gRPC
+   * channel rather than N. The exporter is safe for concurrent use by each instance's reader.
+   */
+  private MetricExporter getMetricExporter(String projectId) throws IOException {
+    MetricExporter existing = metricExporters.get(projectId);
+    if (existing != null) {
+      return existing;
+    }
+    // As with the recorders above, building an exporter stands up a gRPC channel, which is far too
+    // much work to do inside computeIfAbsent while holding a bin lock. Build it outside the map and
+    // discard the loser of any race instead.
+    MetricExporter created = CloudMonitoringMetricRecorder.newExporter(projectId);
+    MetricExporter raced = metricExporters.putIfAbsent(projectId, created);
     if (raced != null) {
       created.shutdown();
       return raced;

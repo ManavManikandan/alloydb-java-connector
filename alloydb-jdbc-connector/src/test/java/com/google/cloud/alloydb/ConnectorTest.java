@@ -32,9 +32,13 @@ import java.security.KeyPair;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import javax.net.ssl.SSLException;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -52,6 +56,9 @@ public class ConnectorTest {
   static ListeningScheduledExecutorService defaultExecutor;
   private static FakeSslServer sslServer;
 
+  /** Every connector a test builds, so that {@link #after} closes it. */
+  private final List<Connector> connectors = new ArrayList<>();
+
   @BeforeClass
   public static void beforeClass() throws Exception {
     defaultExecutor = MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(8));
@@ -60,9 +67,18 @@ public class ConnectorTest {
   }
 
   @After
-  public void after() {
-    // The SSL server is shared by every test in this class, so undo any per-test configuration.
-    sslServer.succeedMetadataExchange();
+  public void after() throws IOException {
+    try {
+      // A connector left open keeps its connection info cache and its metric recorders, and the
+      // socket-tracker task that counting a connection schedules on the shared executor.
+      for (Connector connector : connectors) {
+        connector.close();
+      }
+    } finally {
+      connectors.clear();
+      // The SSL server is shared by every test in this class, so undo any per-test configuration.
+      sslServer.succeedMetadataExchange();
+    }
   }
 
   @AfterClass
@@ -139,7 +155,145 @@ public class ConnectorTest {
     assertThat(stubConnectionInfoCache.hasForceRefreshed()).isFalse();
   }
 
+  @Test
+  public void connect_forcesRefresh_whenTlsHandshakeFails() throws Exception {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    // Connection info carrying a CA certificate that did not sign the server's certificate, so the
+    // client rejects the server during the handshake.
+    StubConnectionInfoCache stubConnectionInfoCache =
+        newStubConnectionInfoCache(
+            "127.0.0.1", TestCertificates.INSTANCE.getIntermediateCertificate());
+    RecordingMetricRecorder recorder = new RecordingMetricRecorder();
+    Connector connector =
+        newConnector(
+            config.getConnectorConfig(),
+            mock,
+            new StubConnectionInfoCacheFactory(stubConnectionInfoCache),
+            recorder);
+
+    assertThrows(SSLException.class, () -> connector.connect(config));
+
+    // A certificate the client cannot validate is a likely sign of stale connection info.
+    assertThat(stubConnectionInfoCache.hasForceRefreshed()).isTrue();
+    assertThat(recorder.dialStatuses).containsExactly(TelemetryAttributes.DIAL_TLS_ERROR);
+  }
+
+  @Test
+  public void connect_returnsThePlainSocket_whenMetricsAreDisabled() throws IOException {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    Connector connector = newConnector(config.getConnectorConfig(), mock);
+
+    Socket socket = connector.connect(config);
+
+    // An application that has opted out of telemetry pays nothing on its reads and writes.
+    assertThat(socket).isNotInstanceOf(InstrumentedSocket.class);
+    socket.close();
+  }
+
+  @Test
+  public void connect_countsTheConnection_whenMetricsAreEnabled() throws Exception {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    RecordingMetricRecorder recorder = new RecordingMetricRecorder();
+    recorder.enabled = true;
+    Connector connector =
+        newConnector(
+            config.getConnectorConfig(),
+            mock,
+            new DefaultConnectionInfoCacheFactory(RefreshStrategy.REFRESH_AHEAD),
+            recorder);
+
+    Socket socket = connector.connect(config);
+
+    assertThat(socket).isInstanceOf(InstrumentedSocket.class);
+    assertThat(recorder.openConnections.get()).isEqualTo(1);
+    assertThat(recorder.closedConnections.get()).isEqualTo(0);
+
+    assertThat(readLine(socket)).isEqualTo(SERVER_MESSAGE);
+    socket.close();
+
+    assertThat(recorder.closedConnections.get()).isEqualTo(1);
+    assertThat(recorder.bytesRx.get()).isAtLeast(SERVER_MESSAGE.length());
+  }
+
+  /**
+   * A metric recorder that throws is not a failed dial. The connector's own dial exceptions are
+   * unchecked, so recording the success inside the handlers that classify a failure let a broken
+   * recorder be counted as a failed dial and force a needless refresh of connection info that was
+   * perfectly good.
+   */
+  @Test
+  public void connect_doesNotRecordAFailedDial_whenRecordingTheSuccessThrows() throws Exception {
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    StubConnectionInfoCache stubConnectionInfoCache = newStubConnectionInfoCache("127.0.0.1");
+    RecordingMetricRecorder recorder = new RecordingMetricRecorder();
+    recorder.failDialLatency = true;
+    Connector connector =
+        newConnector(
+            config.getConnectorConfig(),
+            mock,
+            new StubConnectionInfoCacheFactory(stubConnectionInfoCache),
+            recorder);
+
+    assertThrows(MetadataExchangeException.class, () -> connector.connect(config));
+
+    // The dial itself succeeded, so that is what it is recorded as, exactly once.
+    assertThat(recorder.dialStatuses).containsExactly(TelemetryAttributes.DIAL_SUCCESS);
+    assertThat(stubConnectionInfoCache.hasForceRefreshed()).isFalse();
+  }
+
+  @Test
+  public void connect_schedulesTheSocketTracker_onlyOnceThereIsAConnectionToReap()
+      throws Exception {
+    ScheduledThreadPoolExecutor raw =
+        (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(2);
+    // The stub cache schedules no refresh, so the socket tracker is the only thing that can put a
+    // task on this executor.
+    ConnectionInfoCacheFactory connectionInfoCacheFactory =
+        new StubConnectionInfoCacheFactory(newStubConnectionInfoCache("127.0.0.1"));
+    MockAlloyDBAdminGrpc mock = new MockAlloyDBAdminGrpc("127.0.0.1", IpType.PRIVATE);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    RecordingMetricRecorder recorder = new RecordingMetricRecorder();
+    try {
+      Connector connector =
+          newConnector(
+              config.getConnectorConfig(),
+              mock,
+              connectionInfoCacheFactory,
+              recorderFor(recorder),
+              MoreExecutors.listeningDecorator(raw));
+
+      // An application that has opted out of telemetry has nothing to report, so it must not pay a
+      // repeating task on the executor it shares with certificate refresh.
+      Socket plain = connector.connect(config);
+      plain.close();
+      assertThat(raw.getQueue()).isEmpty();
+
+      recorder.enabled = true;
+      Socket counted = connector.connect(config);
+
+      // The first connection that can be abandoned is what the reaper exists for.
+      assertThat(raw.getQueue()).isNotEmpty();
+      counted.close();
+    } finally {
+      raw.shutdownNow();
+    }
+  }
+
   private StubConnectionInfoCache newStubConnectionInfoCache(String ipAddress) throws Exception {
+    return newStubConnectionInfoCache(ipAddress, TestCertificates.INSTANCE.getRootCertificate());
+  }
+
+  private StubConnectionInfoCache newStubConnectionInfoCache(
+      String ipAddress, X509Certificate caCertificate) throws Exception {
     KeyPair clientConnectorKeyPair = TestCertificates.INSTANCE.getClientKey();
     X509Certificate clientCertificate =
         TestCertificates.INSTANCE.getEphemeralCertificate(
@@ -157,7 +311,7 @@ public class ConnectorTest {
                 clientCertificate,
                 TestCertificates.INSTANCE.getIntermediateCertificate(),
                 TestCertificates.INSTANCE.getRootCertificate()),
-            TestCertificates.INSTANCE.getRootCertificate()));
+            caCertificate));
     return stubConnectionInfoCache;
   }
 
@@ -169,27 +323,62 @@ public class ConnectorTest {
   private Connector newConnector(
       ConnectorConfig config,
       MockAlloyDBAdminGrpc mock,
+      ConnectionInfoCacheFactory connectionInfoCacheFactory,
+      MetricRecorder metricRecorder) {
+    return newConnector(config, mock, connectionInfoCacheFactory, recorderFor(metricRecorder));
+  }
+
+  private ConcurrentHashMap<InstanceName, MetricRecorder> recorderFor(MetricRecorder recorder) {
+    ConcurrentHashMap<InstanceName, MetricRecorder> recorders = new ConcurrentHashMap<>();
+    recorders.put(InstanceName.parse(INSTANCE_NAME), recorder);
+    return recorders;
+  }
+
+  private Connector newConnector(
+      ConnectorConfig config,
+      MockAlloyDBAdminGrpc mock,
       ConnectionInfoCacheFactory connectionInfoCacheFactory) {
+    return newConnector(config, mock, connectionInfoCacheFactory, new ConcurrentHashMap<>());
+  }
+
+  private Connector newConnector(
+      ConnectorConfig config,
+      MockAlloyDBAdminGrpc mock,
+      ConnectionInfoCacheFactory connectionInfoCacheFactory,
+      ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders) {
+    return newConnector(config, mock, connectionInfoCacheFactory, metricRecorders, defaultExecutor);
+  }
+
+  private Connector newConnector(
+      ConnectorConfig config,
+      MockAlloyDBAdminGrpc mock,
+      ConnectionInfoCacheFactory connectionInfoCacheFactory,
+      ConcurrentHashMap<InstanceName, MetricRecorder> metricRecorders,
+      ListeningScheduledExecutorService executor) {
     CredentialFactoryProvider stubCredentialFactoryProvider =
         new CredentialFactoryProvider(new StubCredentialFactory());
     CredentialFactory instanceCredentialFactory =
         stubCredentialFactoryProvider.getInstanceCredentialFactory(config);
     ConnectionInfoRepositoryFactory connectionInfoRepositoryFactory =
-        new StubConnectionInfoRepositoryFactory(defaultExecutor, mock);
+        new StubConnectionInfoRepositoryFactory(executor, mock);
     ConnectionInfoRepository connectionInfoRepository =
         connectionInfoRepositoryFactory.create(instanceCredentialFactory, config);
     AccessTokenSupplier accessTokenSupplier =
         new DefaultAccessTokenSupplier(instanceCredentialFactory);
 
-    return new Connector(
-        config,
-        defaultExecutor,
-        connectionInfoRepository,
-        TestCertificates.INSTANCE.getClientKey(),
-        connectionInfoCacheFactory,
-        new ConcurrentHashMap<>(),
-        accessTokenSupplier,
-        USER_AGENT);
+    Connector connector =
+        new Connector(
+            config,
+            executor,
+            connectionInfoRepository,
+            TestCertificates.INSTANCE.getClientKey(),
+            connectionInfoCacheFactory,
+            new ConcurrentHashMap<>(),
+            accessTokenSupplier,
+            USER_AGENT,
+            metricRecorders);
+    connectors.add(connector);
+    return connector;
   }
 
   private String readLine(Socket socket) throws IOException {
