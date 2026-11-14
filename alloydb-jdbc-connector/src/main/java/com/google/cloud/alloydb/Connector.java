@@ -188,9 +188,11 @@ class Connector {
     // Whether the connector already held connection info for this instance before this dial.
     boolean cacheHit = instances.containsKey(config);
 
-    ConnectionInfoCache connectionInfoCache = getConnection(config, metricRecorder);
+    ConnectionInfoCache connectionInfoCache;
     ConnectionInfo connectionInfo;
     try {
+      // getConnection waits for the first refresh, so it fails the same way getConnectionInfo does.
+      connectionInfoCache = getConnection(config, metricRecorder);
       connectionInfo = connectionInfoCache.getConnectionInfo();
     } catch (RuntimeException e) {
       recordDial(metricRecorder, iamAuthn, cacheHit, TelemetryAttributes.DIAL_CACHE_ERROR);

@@ -222,6 +222,30 @@ public class ConnectorTest {
   }
 
   /**
+   * The first dial to an instance waits for its first refresh inside getConnection, so a refresh
+   * that fails there is a failed dial and must be counted as one.
+   */
+  @Test
+  public void connect_recordsACacheError_whenTheFirstRefreshFails() {
+    MockAlloyDBAdminGrpc mock =
+        new MockAlloyDBAdminGrpc(Code.NOT_FOUND.getNumber(), ERROR_MESSAGE_NOT_FOUND);
+    ConnectionConfig config =
+        new ConnectionConfig.Builder().withInstanceName(InstanceName.parse(INSTANCE_NAME)).build();
+    RecordingMetricRecorder recorder = new RecordingMetricRecorder();
+    recorder.enabled = true;
+    Connector connector =
+        newConnector(
+            config.getConnectorConfig(),
+            mock,
+            new DefaultConnectionInfoCacheFactory(RefreshStrategy.REFRESH_AHEAD),
+            recorder);
+
+    assertThrows(TerminalException.class, () -> connector.connect(config));
+
+    assertThat(recorder.dialStatuses).containsExactly(TelemetryAttributes.DIAL_CACHE_ERROR);
+  }
+
+  /**
    * A metric recorder that throws is not a failed dial. The connector's own dial exceptions are
    * unchecked, so recording the success inside the handlers that classify a failure let a broken
    * recorder be counted as a failed dial and force a needless refresh of connection info that was
