@@ -260,6 +260,7 @@ configuration using the AlloyDB API.
 | alloydbUniverseDomain  | A TPC Universe domain.                                                                                                                                                                                                    | `apis-tpczero.goog` |
 | alloydbGoogleCredentialsPath | A file path to a JSON file containing a GoogleCredentials oauth token.                                                                                                                                              | `/home/alice/secrets/my-credentials.json` |
 | alloydbRefreshStrategy | Either `refresh_ahead` where certificates are refreshed in a background thread, or `lazy` where certificates are refreshed as needed. The `lazy` strategy is best when CPU isn't always available (e.g., Cloud Run) |
+| alloydbEnableGlobalTelemetry | When `false`, stop recording connector metrics through the application's global OpenTelemetry `MeterProvider`. Defaults to `true`. Does not affect built-in Cloud Monitoring export. Set with `ConnectorConfig.Builder.withEnableGlobalTelemetry` on named connectors. See [Connector Metrics and Telemetry](telemetry.md). | `false` |
 
 ### Connection Configuration Properties
 

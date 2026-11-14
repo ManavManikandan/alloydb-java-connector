@@ -86,6 +86,27 @@ public class ConnectionConfigTest {
   }
 
   @Test
+  public void testConfigFromProps_globalTelemetryDefaultsToEnabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isTrue();
+  }
+
+  @Test
+  public void testConfigFromProps_withGlobalTelemetryDisabled() {
+    Properties props = new Properties();
+    props.setProperty(ConnectionConfig.ALLOYDB_INSTANCE_NAME, INSTANCE_NAME);
+    props.setProperty(ConnectionConfig.ALLOYDB_ENABLE_GLOBAL_TELEMETRY, "false");
+
+    ConnectionConfig config = ConnectionConfig.fromConnectionProperties(props);
+
+    assertThat(config.getConnectorConfig().isGlobalTelemetryEnabled()).isFalse();
+  }
+
+  @Test
   public void testConfigFromBuilder() {
     final InstanceName wantInstance = InstanceName.parse(INSTANCE_NAME);
     final String wantNamedConnector = "my-connection";

@@ -55,6 +55,10 @@ class Connector {
   @GuardedBy("socketTrackerGuard")
   private ScheduledFuture<?> socketTrackerTick;
 
+  // Resolved on first use rather than at construction, because the application may install its
+  // global OpenTelemetry provider after the connector is created. Null until then.
+  private volatile GlobalMetricRecorder globalMetricRecorder;
+
   Connector(
       ConnectorConfig config,
       ListeningScheduledExecutorService executor,
@@ -155,7 +159,8 @@ class Connector {
     this.instances.clear();
     this.connectionInfoRepo.close();
     // Shut down all metric recorders. One recorder failing to shut down must not leave the rest
-    // of them running.
+    // of them running. The global MeterProvider is never shut down here: it belongs to the
+    // application.
     this.metricRecorders.forEach(
         (key, mr) -> {
           try {
@@ -288,12 +293,10 @@ class Connector {
     // change.
     MetricRecorder created =
         MetricRecorderFactory.newMetricRecorder(
-            /* enabled= */ false,
+            /* builtInEnabled= */ false,
             () -> getMetricExporter(instanceName.getProject()),
-            instanceName.getProject(),
-            instanceName.getLocation(),
-            instanceName.getCluster(),
-            instanceName.getInstance(),
+            getGlobalMetricRecorder(),
+            instanceName,
             clientUid);
     MetricRecorder raced = metricRecorders.putIfAbsent(instanceName, created);
     if (raced != null) {
@@ -301,6 +304,21 @@ class Connector {
       return raced;
     }
     return created;
+  }
+
+  /** Returns the recorder for the global provider, or null if it is disabled or not yet set. */
+  private GlobalMetricRecorder getGlobalMetricRecorder() {
+    if (!config.isGlobalTelemetryEnabled()) {
+      return null;
+    }
+    GlobalMetricRecorder recorder = globalMetricRecorder;
+    if (recorder == null) {
+      // Racing callers may each build one. That is harmless: OpenTelemetry returns the same
+      // instruments for the same meter and instrument names.
+      recorder = MetricRecorderFactory.newGlobalMetricRecorder();
+      globalMetricRecorder = recorder;
+    }
+    return recorder;
   }
 
   /**

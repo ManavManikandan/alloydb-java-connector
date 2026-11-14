@@ -17,6 +17,7 @@
 package com.google.cloud.alloydb;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,6 +34,9 @@ final class RecordingMetricRecorder implements MetricRecorder {
   final AtomicInteger closedConnections = new AtomicInteger();
   final AtomicLong bytesRx = new AtomicLong();
   final AtomicLong bytesTx = new AtomicLong();
+
+  /** Every call made so far, in order, each as the method name followed by its argument. */
+  final List<String> calls = Collections.synchronizedList(new ArrayList<>());
 
   /**
    * Whether the connector should treat telemetry as turned on. Off by default, as it is in life.
@@ -51,21 +55,42 @@ final class RecordingMetricRecorder implements MetricRecorder {
   /** Makes the byte-count methods throw, which the connector is expected to survive. */
   volatile boolean failByteCounts;
 
+  /** Makes every method throw after logging the call, including {@link #shutdown}. */
+  volatile boolean failAll;
+
+  /** Returns a copy of {@link #calls}. */
+  List<String> getCalls() {
+    synchronized (calls) {
+      return new ArrayList<>(calls);
+    }
+  }
+
+  private void log(String call) {
+    calls.add(call);
+    if (failAll) {
+      throw new IllegalStateException("recorder failure: " + call);
+    }
+  }
+
   @Override
   public boolean isEnabled() {
     return enabled;
   }
 
   @Override
-  public void shutdown() {}
+  public void shutdown() {
+    log("shutdown");
+  }
 
   @Override
   public void recordDialCount(TelemetryAttributes attrs) {
+    log("dialCount " + attrs.getDialStatus());
     dialStatuses.add(attrs.getDialStatus());
   }
 
   @Override
   public void recordDialLatency(double latencyMs) {
+    log("dialLatency");
     if (failDialLatency) {
       throw new MetadataExchangeException("recorder is broken");
     }
@@ -73,16 +98,19 @@ final class RecordingMetricRecorder implements MetricRecorder {
 
   @Override
   public void recordOpenConnection(TelemetryAttributes attrs) {
+    log("openConnection");
     openConnections.incrementAndGet();
   }
 
   @Override
   public void recordClosedConnection(TelemetryAttributes attrs) {
+    log("closedConnection");
     closedConnections.incrementAndGet();
   }
 
   @Override
   public void recordBytesRx(long count) {
+    log("bytesRx " + count);
     if (failByteCounts) {
       throw new IllegalStateException("recorder is broken");
     }
@@ -91,6 +119,7 @@ final class RecordingMetricRecorder implements MetricRecorder {
 
   @Override
   public void recordBytesTx(long count) {
+    log("bytesTx " + count);
     if (failByteCounts) {
       throw new IllegalStateException("recorder is broken");
     }
@@ -98,5 +127,7 @@ final class RecordingMetricRecorder implements MetricRecorder {
   }
 
   @Override
-  public void recordRefreshCount(TelemetryAttributes attrs) {}
+  public void recordRefreshCount(TelemetryAttributes attrs) {
+    log("refreshCount " + attrs.getRefreshStatus());
+  }
 }

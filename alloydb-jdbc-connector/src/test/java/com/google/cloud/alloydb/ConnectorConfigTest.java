@@ -301,6 +301,30 @@ public class ConnectorConfigTest {
                 wantGoogleCredentials,
                 wantGoogleCredentialsPath,
                 wantQuotaProject,
-                RefreshStrategy.REFRESH_AHEAD));
+                RefreshStrategy.REFRESH_AHEAD,
+                true)); // globalTelemetryEnabled
+  }
+
+  @Test
+  public void testGlobalTelemetryDefaultsToEnabled() {
+    ConnectorConfig cc = new ConnectorConfig.Builder().build();
+
+    assertThat(cc.isGlobalTelemetryEnabled()).isTrue();
+  }
+
+  @Test
+  public void testGlobalTelemetryFromBuilder() {
+    ConnectorConfig cc = new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build();
+
+    assertThat(cc.isGlobalTelemetryEnabled()).isFalse();
+  }
+
+  @Test
+  public void testNotEqual_withGlobalTelemetryNotEqual() {
+    ConnectorConfig k1 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(true).build();
+    ConnectorConfig k2 = new ConnectorConfig.Builder().withEnableGlobalTelemetry(false).build();
+
+    assertThat(k1).isNotEqualTo(k2);
+    assertThat(k1.hashCode()).isNotEqualTo(k2.hashCode());
   }
 }
