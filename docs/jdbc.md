@@ -290,6 +290,30 @@ use the instance's Public IP.
 config.addDataSourceProperty("alloydbIpType", "PUBLIC");
 ```
 
+### Metrics
+
+The connector records metrics about its connections through your
+application's global OpenTelemetry `MeterProvider`. If you configure
+OpenTelemetry at startup, with the Java agent, autoconfiguration, or
+`OpenTelemetrySdk.builder()...buildAndRegisterGlobal()`, connector metrics are
+exported to Prometheus, OTLP, or any other exporter you use with no
+connector-specific setup. To keep connector metrics out of that pipeline, opt
+out:
+
+```java
+config.addDataSourceProperty("alloydbEnableGlobalTelemetry", "false");
+```
+
+The connector can also export to Cloud Monitoring itself with the
+`alloydbEnableBuiltInTelemetry` property, which is off by default:
+
+```java
+config.addDataSourceProperty("alloydbEnableBuiltInTelemetry", "true");
+```
+
+See [Connector Metrics and Telemetry](telemetry.md) for the metric contract,
+provider lifecycle, filtering, and export examples.
+
 ## Configuration Reference
 
 - See [Configuration Reference](configuration.md)
